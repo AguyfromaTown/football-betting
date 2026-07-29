@@ -124,6 +124,80 @@ def parse_league_level(url: str, name: str) -> str:
     return "Other"
 
 
+def american_to_decimal(value) -> float | None:
+    """Convert American moneyline odds to decimal odds."""
+    try:
+        american = float(value)
+    except (TypeError, ValueError):
+        return None
+    if american == 0:
+        return None
+    if american > 0:
+        return round(1 + american / 100, 3)
+    return round(1 + 100 / abs(american), 3)
+
+
+def fetch_matches_from_espn_api(date_str: str) -> list[dict]:
+    """Fetch fixtures and available moneyline odds from ESPN's scoreboard API."""
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    date_param = dt.strftime("%Y%m%d")
+    url = (
+        "https://site.api.espn.com/apis/site/v2/sports/soccer/all/scoreboard"
+        f"?dates={date_param}&limit=1000"
+    )
+    body = fetch(url)
+    if not body:
+        return []
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        log("  ESPN API returned invalid JSON")
+        return []
+
+    matches = []
+    for event in data.get("events", []):
+        competitions = event.get("competitions") or []
+        if not competitions:
+            continue
+        competition = competitions[0]
+        competitors = competition.get("competitors") or []
+        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+        if not home or not away:
+            continue
+
+        home_name = home.get("team", {}).get("displayName")
+        away_name = away.get("team", {}).get("displayName")
+        if not home_name or not away_name:
+            continue
+
+        league_name = (
+            event.get("league", {}).get("name")
+            or competition.get("altGameNote")
+            or data.get("leagues", [{}])[0].get("name")
+            or "Unknown League"
+        )
+        odds_entries = competition.get("odds") or []
+        odds_data = (odds_entries[0] if odds_entries else None) or {}
+        moneyline = odds_data.get("moneyline") or {}
+        home_american = (moneyline.get("home") or {}).get("close", {}).get("odds")
+        away_american = (moneyline.get("away") or {}).get("close", {}).get("odds")
+
+        matches.append({
+            "team1": home_name,
+            "team2": away_name,
+            "score": "",
+            "tournament": league_name,
+            "level": parse_league_level(url, league_name),
+            "source": url,
+            "home_odds": american_to_decimal(home_american),
+            "away_odds": american_to_decimal(away_american),
+            "odds_source": (odds_data.get("provider") or {}).get("displayName", "ESPN"),
+        })
+    return matches
+
+
 def fetch_matches_from_espn(date_str: str) -> list[dict]:
     """Fetch football matches from ESPN FC fixtures page."""
     dt = datetime.strptime(date_str, "%Y-%m-%d")
@@ -226,10 +300,13 @@ def fetch_matches_from_fotmob_api(date_str: str) -> list[dict]:
 
 def fetch_matches_all(date_str: str, leagues: list[str] | None = None) -> list[dict]:
     """Aggregate matches from all football sources."""
-    all_matches = []
-    log("Fetching matches from ESPN...")
-    all_matches.extend(fetch_matches_from_espn(date_str))
-    log(f"  Found {sum(1 for _ in all_matches)} from ESPN")
+    log("Fetching matches and odds from ESPN API...")
+    all_matches = fetch_matches_from_espn_api(date_str)
+    log(f"  Found {len(all_matches)} from ESPN API")
+    if not all_matches:
+        log("Fetching matches from ESPN web...")
+        all_matches.extend(fetch_matches_from_espn(date_str))
+        log(f"  Found {len(all_matches)} from ESPN web")
     if not all_matches:
         log("Fetching matches from BBC Sport...")
         all_matches.extend(fetch_matches_from_bbc(date_str))
@@ -301,9 +378,29 @@ def attach_odds(matches: list[dict], odds_min: float, odds_max: float) -> list[d
     """Fetch odds for each match and filter by range."""
     log("Fetching odds for matches...")
     enriched = []
+    needs_lookup = []
+    for match in matches:
+        available = [
+            odd for odd in (match.get("home_odds"), match.get("away_odds"))
+            if odd is not None and odds_min <= odd <= odds_max
+        ]
+        if available:
+            match["odds"] = available[0]
+            enriched.append(match)
+            log(
+                f"  {match['team1']} {match.get('home_odds') or 'N/A'} vs "
+                f"{match['team2']} {match.get('away_odds') or 'N/A'} ✓"
+            )
+        elif match.get("home_odds") is None and match.get("away_odds") is None:
+            needs_lookup.append(match)
+
+    if not needs_lookup:
+        log(f"Qualifying matches in odds range [{odds_min}-{odds_max}]: {len(enriched)}")
+        return enriched
+
     with ThreadPoolExecutor(max_workers=5) as executor:
         future_map = {}
-        for m in matches:
+        for m in needs_lookup:
             future = executor.submit(
                 fetch_odds_for_match, m["team1"], m["team2"]
             )
@@ -356,10 +453,15 @@ def build_prompt(
 
     match_lines = []
     for i, m in enumerate(matches, 1):
+        market_odds = (
+            f"{m['team1']} {m['home_odds']:.2f}, {m['team2']} {m['away_odds']:.2f}"
+            if m.get("home_odds") is not None and m.get("away_odds") is not None
+            else str(m.get("odds", "N/A"))
+        )
         match_lines.append(
             f"Match {i}: {m['team1']} vs {m['team2']}\n"
             f"  Tournament: {m['tournament']} ({m['level']})\n"
-            f"  Odds: {m.get('odds', 'N/A')} (source: {m.get('odds_source', 'N/A')})\n"
+            f"  Moneyline odds: {market_odds} (source: {m.get('odds_source', 'N/A')})\n"
         )
 
     matches_text = "\n".join(match_lines) if match_lines else "No matches found in odds range."
@@ -388,10 +490,10 @@ Matches in odds range [{odds_min}-{odds_max}]:
 
 ## ANALYSIS INSTRUCTIONS
 
-You MUST now perform the full 3-stage pipeline. You have extensive football knowledge built into your training data (up to 2025). Use that knowledge heavily — league tables, team form, historical performances, player quality, tactical styles, recent results. If the scraped match data above is empty, DO NOT just say "no data available" — instead, search your own knowledge for top-tier matches happening near {date_str} that would have odds in the {odds_min}-{odds_max} range, and analyze those.
+You MUST now perform the full 3-stage pipeline using only the verified fixtures and odds supplied above. Historical knowledge may provide context, but do not present it as current form, team news, or confirmed availability.
 
 ### STAGE 1 — Verification & Refinement
-Review the match data above. If no data was scraped, use your training knowledge to identify the most notable football matches around {date_str} across top European leagues (EPL, LaLiga, Bundesliga, Serie A, Ligue 1, UCL, UEL, etc.) and lower divisions. List the teams, approximate odds, and competitions.
+Review only the verified match data above. Never invent fixtures, odds, injuries, or current form. If data is unavailable, return no picks and explain which information is missing.
 
 ### STAGE 2 — Performance Analysis
 For each team whose odds fall within {odds_min}-{odds_max}, analyze:
@@ -556,12 +658,16 @@ def parse_recommendations(report: str) -> list[dict]:
         if tournament_match:
             last_tournament = tournament_match.group(1).strip()
 
-        team_match = re.search(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:vs|v\.|v)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', line_clean)
+        team_match = re.search(
+            r'(.+?)\s+v(?:s)?\.?\s+(.+?)(?:\s+\(|$)',
+            line_clean,
+            flags=re.IGNORECASE,
+        )
         if team_match:
-            last_team = team_match.group(1).strip()
-            last_opponent = team_match.group(2).strip()
+            last_team = re.sub(r'^\d+[.)]\s*|\*+', '', team_match.group(1)).strip()
+            last_opponent = re.sub(r'\*+$', '', team_match.group(2)).strip()
 
-        odds_match = re.search(r'(?:odds?|at|@)\s*([1-9]\.[0-9]+)', line_lower)
+        odds_match = re.search(r'(?:odds?|at|@)\s*[:=-]?\s*([1-9]\.[0-9]+)', line_lower)
         if odds_match and last_team:
             try:
                 odds_val = float(odds_match.group(1))
