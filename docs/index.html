@@ -1,0 +1,640 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0b0f0e">
+  <title>Footbook — Football Betting Performance</title>
+  <style>
+    :root {
+      --bg: #090d0c;
+      --surface: #101513;
+      --surface-2: #151b18;
+      --line: rgba(255,255,255,.075);
+      --line-strong: rgba(255,255,255,.13);
+      --text: #f2f5f2;
+      --muted: #8c9791;
+      --muted-2: #5c6761;
+      --green: #4bda7a;
+      --green-dark: #218842;
+      --green-soft: rgba(75,218,122,.1);
+      --red: #ff716c;
+      --red-soft: rgba(255,113,108,.1);
+      --amber: #ffc46b;
+      --amber-soft: rgba(255,196,107,.09);
+      --radius: 18px;
+      --shadow: 0 22px 70px rgba(0,0,0,.27);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 8% -5%, rgba(75,218,122,.08), transparent 25rem),
+        radial-gradient(circle at 95% 12%, rgba(79,148,112,.08), transparent 25rem),
+        var(--bg);
+      font: 14px/1.5 Inter, "Segoe UI", system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input { font: inherit; }
+    button { color: inherit; }
+
+    .shell { width: min(1240px, calc(100% - 48px)); margin: 0 auto; padding: 30px 0 48px; }
+
+    .topbar {
+      display: flex; align-items: center; justify-content: space-between; gap: 24px;
+      padding-bottom: 26px; border-bottom: 1px solid var(--line);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-mark {
+      display: grid; place-items: center; width: 38px; height: 38px; border-radius: 11px;
+      background: var(--green); color: #10150d; box-shadow: 0 0 30px rgba(75,218,122,.16);
+    }
+    .brand-mark svg { width: 22px; height: 22px; }
+    .brand-name { font: 800 18px/1 Inter, "Segoe UI", sans-serif; letter-spacing: -.4px; }
+    .brand-name span { color: var(--green); }
+    .status {
+      display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px;
+      padding: 8px 12px; border: 1px solid var(--line); background: rgba(255,255,255,.025);
+      border-radius: 999px;
+    }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px var(--green-soft); }
+    .status-dot.warning { background: var(--amber); box-shadow: 0 0 0 4px var(--amber-soft); }
+    .status.error .status-dot { background: var(--red); box-shadow: 0 0 0 4px var(--red-soft); }
+
+    .banner {
+      display: none; align-items: center; justify-content: space-between; gap: 16px;
+      margin-top: 18px; padding: 12px 18px; border: 1px solid var(--amber-soft);
+      background: var(--amber-soft); border-radius: var(--radius-sm); font-size: 13px;
+    }
+    .banner.show { display: flex; flex-wrap: wrap; }
+    .banner .banner-text { color: var(--amber); }
+    .banner-actions { display: flex; gap: 8px; }
+    .banner-btn {
+      padding: 6px 14px; border: 1px solid rgba(255,196,107,.25); border-radius: 7px;
+      background: transparent; cursor: pointer; font-size: 12px; font-weight: 600; transition: background .15s;
+    }
+    .banner-btn:hover { background: rgba(255,196,107,.1); }
+    .banner-btn.primary {
+      background: var(--amber); color: #10150d; border-color: var(--amber);
+    }
+    .banner-btn.primary:hover { background: #ffd082; }
+
+    .hero { display: flex; justify-content: space-between; align-items: flex-end; gap: 30px; padding: 48px 0 30px; }
+    .eyebrow { color: var(--green); font-size: 11px; font-weight: 700; letter-spacing: 1.7px; text-transform: uppercase; }
+    h1 { max-width: 700px; margin: 9px 0 10px; font: 800 clamp(34px,5vw,58px)/1.04 Inter, "Segoe UI", sans-serif; letter-spacing: -2.4px; }
+    .hero p { max-width: 590px; margin: 0; color: var(--muted); font-size: 15px; }
+    .updated { flex: 0 0 auto; color: var(--muted-2); font-size: 12px; text-align: right; }
+    .updated strong { display: block; margin-top: 3px; color: var(--muted); font-weight: 500; }
+
+    .stats { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; margin-bottom: 12px; }
+    .card {
+      position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius);
+      background: linear-gradient(145deg, rgba(255,255,255,.025), transparent 50%), var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .metric { min-height: 168px; padding: 22px; }
+    .metric::after {
+      content: ""; position: absolute; right: -32px; bottom: -45px; width: 110px; height: 110px;
+      border: 1px solid var(--line); border-radius: 50%;
+    }
+    .metric-label { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 12px; font-weight: 600; }
+    .metric-icon { width: 28px; height: 28px; padding: 6px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); }
+    .metric-value { margin-top: 25px; font: 800 31px/1 Inter, "Segoe UI", sans-serif; letter-spacing: -1px; }
+    .metric-sub { margin-top: 10px; color: var(--muted-2); font-size: 12px; }
+    .positive { color: var(--green) !important; }
+    .negative { color: var(--red) !important; }
+
+    .dashboard { display: grid; grid-template-columns: minmax(0,1.75fr) minmax(280px,.75fr); gap: 12px; margin-bottom: 12px; }
+    .panel { padding: 22px; }
+    .panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 20px; }
+    .panel-title { margin: 0; font: 700 15px/1.25 Inter, "Segoe UI", sans-serif; }
+    .panel-kicker { margin-top: 5px; color: var(--muted-2); font-size: 12px; }
+    .period { color: var(--muted); font-size: 11px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px; }
+    .chart-wrap { position: relative; height: 245px; }
+    #bankrollChart { width: 100%; height: 100%; display: block; }
+    .chart-empty { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; border: 1px dashed var(--line-strong); border-radius: 12px; color: var(--muted-2); }
+    .chart-empty svg { display: block; width: 28px; margin: 0 auto 9px; opacity: .65; }
+
+    .record { display: flex; align-items: center; gap: 22px; margin: 10px 0 24px; }
+    .ring {
+      --p: 0; position: relative; display: grid; place-items: center; flex: 0 0 112px; width: 112px; height: 112px;
+      border-radius: 50%; background: conic-gradient(var(--green) calc(var(--p)*1%), #252c28 0);
+    }
+    .ring::before { content: ""; position: absolute; inset: 9px; border-radius: 50%; background: var(--surface); }
+    .ring-copy { position: relative; z-index: 1; text-align: center; }
+    .ring-copy strong { display: block; font: 800 23px/1 Inter, "Segoe UI", sans-serif; }
+    .ring-copy span { color: var(--muted-2); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+    .record-numbers { display: grid; gap: 12px; width: 100%; }
+    .record-row { display: flex; justify-content: space-between; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); color: var(--muted); }
+    .record-row:last-child { padding: 0; border: 0; }
+    .record-row b { color: var(--text); }
+    .legend-dot { display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; }
+    .win-dot { background: var(--green); } .loss-dot { background: var(--red); } .open-dot { background: var(--amber); }
+
+    .table-card { box-shadow: var(--shadow); }
+    .table-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 21px 22px; border-bottom: 1px solid var(--line); }
+    .table-tools { display: flex; align-items: center; gap: 10px; }
+    .count { color: var(--muted); font-size: 11px; padding: 6px 9px; background: var(--surface-2); border-radius: 7px; }
+    .search { position: relative; }
+    .search svg { position: absolute; left: 11px; top: 50%; width: 14px; transform: translateY(-50%); color: var(--muted-2); }
+    .search input {
+      width: 190px; padding: 8px 12px 8px 33px; color: var(--text); background: var(--surface-2);
+      border: 1px solid var(--line); border-radius: 9px; outline: none;
+    }
+    .search input:focus { border-color: rgba(75,218,122,.35); }
+    .search input::placeholder { color: var(--muted-2); }
+    .table-scroll { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; white-space: nowrap; }
+    th { padding: 12px 22px; color: var(--muted-2); background: rgba(255,255,255,.012); font-size: 10px; font-weight: 700; letter-spacing: 1px; text-align: left; text-transform: uppercase; }
+    td { padding: 15px 22px; border-top: 1px solid var(--line); color: #cdd3cf; }
+    tbody tr { transition: background .15s; }
+    tbody tr:hover { background: rgba(255,255,255,.018); }
+    .match { max-width: 310px; overflow: hidden; color: var(--text); font-weight: 600; text-overflow: ellipsis; }
+    .match small { display: block; color: var(--muted-2); font-weight: 400; }
+    .mono { font-variant-numeric: tabular-nums; }
+
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border-radius: 999px;
+      font-size: 11px; font-weight: 700; white-space: nowrap;
+    }
+    .badge::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+    .badge.win { color: var(--green); background: var(--green-soft); }
+    .badge.loss { color: var(--red); background: var(--red-soft); }
+    .badge.pending {
+      color: var(--amber); background: var(--amber-soft); cursor: pointer;
+      transition: filter .15s, border-color .15s; border: 1px solid transparent;
+    }
+    .badge.pending:hover { filter: brightness(1.25); border-color: rgba(255,196,107,.25); }
+    .result-picker {
+      display: inline-flex; gap: 4px; white-space: nowrap;
+    }
+    .result-picker button {
+      padding: 4px 12px; border: 1px solid var(--line); border-radius: 6px;
+      background: var(--surface-2); cursor: pointer; font-size: 11px; font-weight: 700;
+      transition: background .15s, border-color .15s;
+    }
+    .result-picker button:hover { border-color: var(--muted-2); }
+    .result-picker button.pick-win { color: var(--green); }
+    .result-picker button.pick-win:hover { background: var(--green-soft); border-color: rgba(75,218,122,.3); }
+    .result-picker button.pick-loss { color: var(--red); }
+    .result-picker button.pick-loss:hover { background: var(--red-soft); border-color: rgba(255,113,108,.3); }
+
+    .toast {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(100px);
+      padding: 10px 20px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line);
+      font-size: 13px; opacity: 0; transition: transform .3s, opacity .3s; pointer-events: none; z-index: 100;
+    }
+    .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+
+    .toast.success { border-color: rgba(75,218,122,.25); color: var(--green); }
+
+    .empty { display: none; padding: 64px 20px; border-top: 1px solid var(--line); text-align: center; }
+    .empty-icon { display: grid; place-items: center; width: 48px; height: 48px; margin: 0 auto 15px; color: var(--green); background: var(--green-soft); border: 1px solid rgba(75,218,122,.15); border-radius: 14px; }
+    .empty-icon svg { width: 23px; }
+    .empty h3 { margin: 0 0 5px; font: 700 16px Inter, "Segoe UI", sans-serif; }
+    .empty p { max-width: 440px; margin: 0 auto; color: var(--muted); font-size: 13px; }
+    .empty code { color: #cbd6cf; }
+    .footer { display: flex; justify-content: space-between; gap: 16px; padding: 20px 2px 0; color: var(--muted-2); font-size: 11px; }
+
+    .skeleton { color: transparent; background: linear-gradient(90deg,#1b211e 25%,#262e2a 50%,#1b211e 75%); background-size: 200% 100%; border-radius: 5px; animation: shimmer 1.5s infinite; }
+    @keyframes shimmer { to { background-position: -200% 0; } }
+
+    @media (max-width: 900px) {
+      .stats { grid-template-columns: repeat(2,1fr); }
+      .dashboard { grid-template-columns: 1fr; }
+      h1 { letter-spacing: -1.5px; }
+      .banner { flex-direction: column; align-items: stretch; }
+      .banner-actions { justify-content: flex-end; }
+    }
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 28px,1240px); padding-top: 18px; }
+      .topbar { padding-bottom: 18px; }
+      .hero { align-items: flex-start; flex-direction: column; padding: 34px 0 24px; }
+      .updated { text-align: left; }
+      .stats { grid-template-columns: 1fr 1fr; }
+      .metric { min-height: 145px; padding: 17px; }
+      .metric-value { margin-top: 19px; font-size: 24px; }
+      .panel { padding: 18px; }
+      .chart-wrap { height: 210px; }
+      .record { gap: 16px; }
+      .ring { flex-basis: 94px; width: 94px; height: 94px; }
+      .table-toolbar { align-items: flex-start; flex-direction: column; padding: 18px; }
+      .table-tools, .search, .search input { width: 100%; }
+      .count { display: none; }
+      th, td { padding-left: 18px; padding-right: 18px; }
+      .footer { flex-direction: column; }
+    }
+    @media (max-width: 390px) {
+      .stats { grid-template-columns: 1fr; }
+      .metric { min-height: 130px; }
+    }
+    @media (prefers-reduced-motion: reduce) { *,*::before,*::after { scroll-behavior: auto !important; animation: none !important; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1"><circle cx="12" cy="12" r="10"/><path d="M12 2v20M2 12h20"/><circle cx="12" cy="12" r="3"/></svg>
+        </div>
+        <div class="brand-name">foot<span>book</span></div>
+      </div>
+      <div class="status" id="status"><span class="status-dot"></span><span id="status-text">Syncing data</span></div>
+    </header>
+
+    <div class="banner" id="banner">
+      <span class="banner-text" id="banner-text">Results saved locally.</span>
+      <div class="banner-actions">
+        <button class="banner-btn" id="clear-local-btn">Clear</button>
+        <button class="banner-btn primary" id="copy-csv-btn">Copy updated CSV</button>
+      </div>
+    </div>
+
+    <section class="hero">
+      <div>
+        <div class="eyebrow">Performance dashboard</div>
+        <h1>Your football edge,<br>made visible.</h1>
+        <p>Click any <b style="color:var(--amber)">Open</b> badge to mark a result. Returns update instantly.</p>
+      </div>
+      <div class="updated">Latest activity<strong id="last-updated">Loading your log…</strong></div>
+    </section>
+
+    <section class="stats" aria-label="Betting summary">
+      <article class="card metric">
+        <div class="metric-label">Total bets <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M7 3h10v4a5 5 0 0 1-10 0V3Z"/><path d="M12 12v5m-4 4h8m-4-4H9m8-12h3v2a4 4 0 0 1-4 4M7 5H4v2a4 4 0 0 0 4 4"/></svg></div>
+        <div class="metric-value skeleton" id="total-bets">000</div>
+        <div class="metric-sub" id="total-stake-sub">Calculating total stake</div>
+      </article>
+      <article class="card metric">
+        <div class="metric-label">Win rate <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m4 15 5-5 4 4 7-8"/><path d="M15 6h5v5"/></svg></div>
+        <div class="metric-value skeleton" id="win-rate">00.0%</div>
+        <div class="metric-sub" id="win-loss-sub">Settled results</div>
+      </article>
+      <article class="card metric">
+        <div class="metric-label">Net profit <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M16 8.5c-.8-.7-2-1-3.2-1-1.8 0-3 .8-3 2s1 1.8 3.2 2.3 3.2 1.1 3.2 2.4-1.3 2.3-3.3 2.3c-1.5 0-2.8-.5-3.7-1.3M13 5v14"/></svg></div>
+        <div class="metric-value skeleton" id="pnl">€00.00</div>
+        <div class="metric-sub" id="pnl-sub">Return on investment</div>
+      </article>
+      <article class="card metric">
+        <div class="metric-label">Bankroll <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7h16a2 2 0 0 1 2 2v10H5a2 2 0 0 1-2-2V7Z"/><path d="M3 7 16 3v4m1 5h4"/></svg></div>
+        <div class="metric-value skeleton" id="last-balance">€00.00</div>
+        <div class="metric-sub" id="balance-sub">Latest recorded balance</div>
+      </article>
+    </section>
+
+    <section class="dashboard">
+      <article class="card panel">
+        <div class="panel-head">
+          <div><h2 class="panel-title">Bankroll trajectory</h2><div class="panel-kicker">Balance after each recorded bet</div></div>
+          <span class="period" id="chart-period">All time</span>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="bankrollChart" aria-label="Bankroll history chart"></canvas>
+          <div class="chart-empty" id="chart-empty"><div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 19V5m0 14h16"/><path d="m7 15 4-4 3 2 5-6"/></svg>Bankroll history will appear after<br>two balances are recorded.</div></div>
+        </div>
+      </article>
+      <article class="card panel">
+        <div class="panel-head">
+          <div><h2 class="panel-title">Win / loss record</h2><div class="panel-kicker">Settled bet outcomes</div></div>
+        </div>
+        <div class="record">
+          <div class="ring" id="result-ring"><div class="ring-copy"><strong id="ring-rate">—</strong><span>win rate</span></div></div>
+          <div class="record-numbers">
+            <div class="record-row"><span><i class="legend-dot win-dot"></i>Won</span><b id="wins">0</b></div>
+            <div class="record-row"><span><i class="legend-dot loss-dot"></i>Lost</span><b id="losses">0</b></div>
+            <div class="record-row"><span><i class="legend-dot open-dot"></i>Open</span><b id="pending">0</b></div>
+          </div>
+        </div>
+        <div class="record-row"><span>Average odds</span><b id="avg-odds">—</b></div>
+      </article>
+    </section>
+
+    <section class="card table-card">
+      <div class="table-toolbar">
+        <div><h2 class="panel-title">Bet history</h2><div class="panel-kicker">Click <b style="color:var(--amber)">Open</b> to mark a result</div></div>
+        <div class="table-tools">
+          <span class="count" id="row-count">0 entries</span>
+          <label class="search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+            <input id="search" type="search" placeholder="Search bets" aria-label="Search bet history">
+          </label>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table id="log-table">
+          <thead><tr><th>Date</th><th>Match</th><th>Selection</th><th>Odds</th><th>Stake</th><th>Result</th><th>Return</th></tr></thead>
+          <tbody id="log-body"></tbody>
+        </table>
+        <div class="empty" id="empty-state">
+          <div class="empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2V3Z"/><path d="M9 8h6m-6 4h4"/></svg></div>
+          <h3>No bets logged yet</h3>
+          <p>Your dashboard is ready. New entries from <code>bets-log.csv</code> will appear here automatically.</p>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer"><span>Footbook performance dashboard</span><span>Results marked here are saved in your browser &middot; <a href="#" id="clear-all-link" style="color:var(--muted-2)">Clear all local results</a></span></footer>
+
+    <div class="toast" id="toast"></div>
+  </main>
+
+  <script>
+    const DATA_URL = "https://api.github.com/repos/AguyfromaTown/football-betting/contents/bets-log.csv";
+    const STORAGE_KEY = "footbook_results";
+    let allRows = [];
+    let localResults = {};
+
+    const el = id => document.getElementById(id);
+    const money = value => new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR" }).format(value || 0);
+    const safe = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;" })[char]);
+
+    function loadLocalResults() {
+      try { localResults = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; } catch {}
+    }
+    function saveLocalResults() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(localResults));
+      updateBanner();
+    }
+    function rowKey(r) {
+      return `${r.date}|${r.match}|${r.odds}`;
+    }
+    function hasLocal() {
+      return Object.keys(localResults).length > 0;
+    }
+    function updateBanner() {
+      const count = Object.keys(localResults).length;
+      el("banner").classList.toggle("show", count > 0);
+      el("banner-text").textContent = count + " result" + (count > 1 ? "s" : "") + " saved in browser.";
+      if (count > 0) el("status-dot").classList.add("warning");
+      else el("status-dot").classList.remove("warning");
+    }
+
+    function parseCSV(text) {
+      const records = []; let row = []; let field = ""; let quoted = false;
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i], next = text[i + 1];
+        if (char === '"' && quoted && next === '"') { field += '"'; i++; }
+        else if (char === '"') quoted = !quoted;
+        else if (char === "," && !quoted) { row.push(field); field = ""; }
+        else if ((char === "\n" || char === "\r") && !quoted) {
+          if (char === "\r" && next === "\n") i++;
+          row.push(field); field = "";
+          if (row.some(cell => cell.trim())) records.push(row);
+          row = [];
+        } else field += char;
+      }
+      if (field || row.length) { row.push(field); records.push(row); }
+      if (records.length < 2) return [];
+      const headers = records[0].map(h => h.trim().toLowerCase());
+      return records.slice(1).map(cells => Object.fromEntries(headers.map((h,i) => [h, (cells[i] || "").trim()])));
+    }
+
+    function normalizeRows(text) {
+      return parseCSV(text).map(row => {
+        const odds = Number.parseFloat(row.odds) || 0;
+        const stake = Number.parseFloat(row.stake) || 0;
+        const rawResult = (row.result || "").toLowerCase();
+        return {
+          date: row.date || "",
+          match: row.match || "",
+          bet: row.bet || row.selection || "",
+          odds: odds,
+          stake: stake,
+          result: rawResult,
+          ret: Number.parseFloat(row.return) || 0,
+          balance: Number.parseFloat(row["starting balance"] || row.balance),
+        };
+      }).filter(row => row.date || row.match || row.bet);
+    }
+
+    function applyLocal(rows) {
+      return rows.map(r => {
+        const key = rowKey(r);
+        const lr = localResults[key];
+        if (lr) {
+          const won = lr === "win";
+          const stake = r.stake || 0;
+          return { ...r, result: won ? "win" : "loss", ret: won ? Math.round(stake * r.odds * 100) / 100 : 0 };
+        }
+        return { ...r };
+      });
+    }
+
+    function renderStats(rows) {
+      const settled = rows.filter(r => ["win","loss","won","lost"].includes(r.result));
+      const wins = settled.filter(r => ["win","won"].includes(r.result));
+      const losses = settled.filter(r => ["loss","lost"].includes(r.result));
+      const pending = rows.length - settled.length;
+      const totalStake = rows.reduce((sum,r) => sum + r.stake, 0);
+      const totalReturn = rows.reduce((sum,r) => sum + r.ret, 0);
+      const pnl = totalReturn - totalStake;
+      const roi = totalStake ? pnl / totalStake * 100 : 0;
+      const winRate = settled.length ? wins.length / settled.length * 100 : 0;
+      const balances = rows.filter(r => Number.isFinite(r.balance));
+      const latestBalance = balances.length ? balances.at(-1).balance : null;
+      const odds = rows.filter(r => r.odds > 0);
+
+      setMetric("total-bets", rows.length.toLocaleString());
+      el("total-stake-sub").textContent = money(totalStake) + " total staked";
+      setMetric("win-rate", settled.length ? winRate.toFixed(1) + "%" : "—", winRate >= 50 && settled.length ? "positive" : "");
+      el("win-loss-sub").textContent = settled.length ? `${wins.length} won · ${losses.length} lost` : "No settled bets yet";
+      setMetric("pnl", (pnl > 0 ? "+" : "") + money(pnl), pnl > 0 ? "positive" : pnl < 0 ? "negative" : "");
+      el("pnl-sub").textContent = (roi > 0 ? "+" : "") + roi.toFixed(1) + "% return on stake";
+      setMetric("last-balance", latestBalance === null ? "—" : money(latestBalance));
+      el("balance-sub").textContent = latestBalance === null ? "No balance recorded yet" : "Latest recorded balance";
+      el("wins").textContent = wins.length;
+      el("losses").textContent = losses.length;
+      el("pending").textContent = pending;
+      el("ring-rate").textContent = settled.length ? Math.round(winRate) + "%" : "—";
+      el("result-ring").style.setProperty("--p", winRate);
+      el("avg-odds").textContent = odds.length ? (odds.reduce((s,r) => s + r.odds,0) / odds.length).toFixed(2) : "—";
+    }
+
+    function setMetric(id, value, tone) {
+      const node = el(id); node.textContent = value; node.className = "metric-value" + (tone ? " " + tone : "");
+    }
+
+    function renderTable(rows) {
+      const body = el("log-body");
+      body.innerHTML = rows.map(r => {
+        const won = ["win","won"].includes(r.result);
+        const lost = ["loss","lost"].includes(r.result);
+        const isOpen = !won && !lost;
+
+        const parts = r.match.match(/^(.*?)\s*(\([^)]*\))$/);
+        const retDisplay = r.ret ? money(r.ret) : "—";
+
+        let resultCell;
+        if (won) {
+          resultCell = `<span class="badge win">Won</span>`;
+        } else if (lost) {
+          resultCell = `<span class="badge loss">Lost</span>`;
+        } else {
+          const key = safe(rowKey(r));
+          resultCell = `<span class="badge pending" data-key="${key}">Open</span>`;
+        }
+
+        return `<tr>
+          <td class="mono">${safe(r.date || "—")}</td>
+          <td><div class="match">${safe(parts ? parts[1] : r.match || "—")}${parts ? `<small>${safe(parts[2])}</small>` : ""}</div></td>
+          <td>${safe(r.bet || "—")}</td>
+          <td class="mono">${r.odds ? r.odds.toFixed(2) : "—"}</td>
+          <td class="mono">${r.stake ? money(r.stake) : "—"}</td>
+          <td>${resultCell}</td>
+          <td class="mono ${r.ret > r.stake ? "positive" : ""}">${retDisplay}</td>
+        </tr>`;
+      }).join("");
+      el("log-table").style.display = rows.length ? "table" : "none";
+      el("empty-state").style.display = rows.length ? "none" : "block";
+      el("row-count").textContent = `${rows.length} ${rows.length === 1 ? "entry" : "entries"}`;
+
+      document.querySelectorAll(".badge.pending[data-key]").forEach(el => {
+        el.addEventListener("click", function(e) {
+          e.stopPropagation();
+          const key = this.dataset.key;
+          showResultPicker(this, key);
+        });
+      });
+    }
+
+    function showResultPicker(targetEl, key) {
+      const existing = targetEl.parentElement.querySelector(".result-picker");
+      if (existing) { existing.remove(); return; }
+      const picker = document.createElement("span");
+      picker.className = "result-picker";
+      picker.innerHTML = `<button class="pick-win" data-action="win">Won</button><button class="pick-loss" data-action="loss">Lost</button>`;
+      targetEl.replaceWith(picker);
+      picker.querySelectorAll("button").forEach(btn => {
+        btn.addEventListener("click", function(e) {
+          e.stopPropagation();
+          const result = this.dataset.action;
+          localResults[key] = result;
+          saveLocalResults();
+          refreshAll();
+          showToast(result === "win" ? "Marked as Won" : "Marked as Lost", "success");
+        });
+      });
+    }
+
+    function refreshAll() {
+      const withLocal = applyLocal(allRows);
+      renderStats(withLocal);
+      renderTable(withLocal.reverse());
+      drawChart(withLocal);
+      updateStatus(withLocal);
+    }
+
+    function updateStatus(rows) {
+      el("last-updated").textContent = rows.length ? `${rows.at(-1).date} · ${rows.length} total bets` : "Waiting for your first bet";
+    }
+
+    function drawChart(rows) {
+      const points = rows.filter(r => Number.isFinite(r.balance));
+      const empty = el("chart-empty"), canvas = el("bankrollChart");
+      if (points.length < 2) { empty.style.display = "grid"; canvas.style.visibility = "hidden"; return; }
+      empty.style.display = "none"; canvas.style.visibility = "visible";
+      el("chart-period").textContent = `${points[0].date} — ${points.at(-1).date}`;
+      const rect = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.round(rect.width * dpr); canvas.height = Math.round(rect.height * dpr);
+      const ctx = canvas.getContext("2d"); ctx.scale(dpr,dpr);
+      const w = rect.width, h = rect.height, pad = { t: 18, r: 15, b: 28, l: 52 };
+      const vals = points.map(r => r.balance), rawMin = Math.min(...vals), rawMax = Math.max(...vals);
+      const buffer = Math.max((rawMax - rawMin) * .14, rawMax * .01, 1);
+      const min = rawMin - buffer, max = rawMax + buffer, range = max-min;
+      const x = i => pad.l + i/(vals.length-1)*(w-pad.l-pad.r);
+      const y = v => pad.t + (max-v)/range*(h-pad.t-pad.b);
+
+      ctx.font = '10px "Segoe UI"'; ctx.fillStyle = "#5c6761"; ctx.textAlign = "right"; ctx.textBaseline = "middle";
+      for (let i=0;i<4;i++) {
+        const yy = pad.t + i/3*(h-pad.t-pad.b), val = max-i/3*range;
+        ctx.beginPath(); ctx.strokeStyle = "rgba(255,255,255,.055)"; ctx.lineWidth = 1;
+        ctx.moveTo(pad.l,yy); ctx.lineTo(w-pad.r,yy); ctx.stroke(); ctx.fillText("€"+Math.round(val),pad.l-9,yy);
+      }
+      const gradient = ctx.createLinearGradient(0,pad.t,0,h-pad.b);
+      gradient.addColorStop(0,"rgba(75,218,122,.22)");
+      gradient.addColorStop(1,"rgba(75,218,122,0)");
+      ctx.beginPath(); vals.forEach((v,i) => i ? ctx.lineTo(x(i),y(v)) : ctx.moveTo(x(i),y(v)));
+      ctx.lineTo(x(vals.length-1),h-pad.b); ctx.lineTo(x(0),h-pad.b); ctx.closePath(); ctx.fillStyle=gradient; ctx.fill();
+      ctx.beginPath(); vals.forEach((v,i) => i ? ctx.lineTo(x(i),y(v)) : ctx.moveTo(x(i),y(v)));
+      ctx.strokeStyle="#4bda7a"; ctx.lineWidth=2.2; ctx.lineJoin="round"; ctx.lineCap="round"; ctx.stroke();
+      const last = vals.length-1; ctx.beginPath(); ctx.arc(x(last),y(vals[last]),4,0,Math.PI*2); ctx.fillStyle="#4bda7a"; ctx.fill();
+      ctx.beginPath(); ctx.arc(x(last),y(vals[last]),8,0,Math.PI*2); ctx.strokeStyle="rgba(75,218,122,.24)"; ctx.lineWidth=4; ctx.stroke();
+      ctx.fillStyle="#5c6761"; ctx.textBaseline="bottom"; ctx.textAlign="left"; ctx.fillText(points[0].date,pad.l,h);
+      ctx.textAlign="right"; ctx.fillText(points.at(-1).date,w-pad.r,h);
+    }
+
+    function updateSearch() {
+      const query = el("search").value.trim().toLowerCase();
+      const withLocal = applyLocal(allRows);
+      renderTable(query ? withLocal.reverse().filter(r => Object.values(r).some(v => String(v).toLowerCase().includes(query))) : withLocal.reverse());
+    }
+
+    function showToast(msg, cls) {
+      const t = el("toast"); t.textContent = msg; t.className = "toast" + (cls ? " " + cls : "");
+      requestAnimationFrame(() => { t.classList.add("show");
+        setTimeout(() => t.classList.remove("show"), 2000);
+      });
+    }
+
+    function generateUpdatedCSV() {
+      const withLocal = applyLocal(allRows);
+      const header = "DATE,MATCH,BET,ODDS,STAKE,RESULT,RETURN,STARTING BALANCE";
+      const rows = withLocal.map(r => {
+        const result = ["win","won"].includes(r.result) ? "win" : ["loss","lost"].includes(r.result) ? "loss" : "";
+        const ret = result === "win" ? (r.odds * r.stake).toFixed(2) : result === "loss" ? "0.00" : "";
+        return `${r.date},${r.match},${r.bet},${r.odds},${r.stake.toFixed(2)},${result},${ret},${r.balance !== null ? r.balance.toFixed(2) : ""}`;
+      }).join("\n");
+      return header + "\n" + rows;
+    }
+
+    async function loadLog() {
+      loadLocalResults();
+      try {
+        const response = await fetch(DATA_URL);
+        if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
+        const json = await response.json();
+        const text = atob(json.content.replace(/\s/g, ""));
+        allRows = normalizeRows(text);
+        refreshAll();
+        el("status-text").textContent = hasLocal() ? "Data synced · results pending" : "Data synced";
+      } catch (error) {
+        renderStats([]); renderTable([]); drawChart([]);
+        el("status").classList.add("error"); el("status-text").textContent = "Sync failed";
+        el("last-updated").textContent = "Could not load bets-log.csv";
+        el("empty-state").querySelector("h3").textContent = "Could not load your betting log";
+        el("empty-state").querySelector("p").textContent = error.message + ". Refresh the page to try again.";
+      }
+    }
+
+    el("search").addEventListener("input", updateSearch);
+    window.addEventListener("resize", () => { const wl = applyLocal(allRows); drawChart(wl); });
+
+    el("copy-csv-btn").addEventListener("click", () => {
+      const csv = generateUpdatedCSV();
+      navigator.clipboard.writeText(csv).then(() => {
+        showToast("CSV copied to clipboard — paste into bets-log.csv and push", "success");
+      }).catch(() => {
+        const ta = document.createElement("textarea"); ta.value = csv; ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
+        showToast("CSV copied to clipboard", "success");
+      });
+    });
+
+    el("clear-local-btn").addEventListener("click", () => {
+      localResults = {}; saveLocalResults(); refreshAll(); showToast("Local results cleared", "success");
+    });
+    el("clear-all-link").addEventListener("click", (e) => {
+      e.preventDefault(); localResults = {}; saveLocalResults(); refreshAll(); showToast("All local results cleared", "success");
+    });
+
+    loadLog();
+  </script>
+</body>
+</html>

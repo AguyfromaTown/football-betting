@@ -1,0 +1,47 @@
+BETTING STRATEGY — Tiered Proportional Betting (Simplified Fractional Kelly)
+
+The old 5-step recovery sequence was replaced because it risked 99%+ bankroll 
+destruction on a single 5-bet losing streak (Bet 5 alone was 75% of bankroll). 
+The new system is mathematically optimal for long-term growth while capping 
+per-bet risk to a maximum of 3%.
+
+HOW IT WORKS
+
+Each bet's stake is a fixed percentage of the current bankroll, determined by 
+the pick grade from the analysis:
+
+  Top Pick (score > 8.0, EV > 8%)    → 3% of bankroll
+  Value Pick (score > 7.0, EV > 5%)  → 2% of bankroll
+  Moderate Pick (score > 5.5, EV > 0%) → 1% of bankroll
+  No Bet (everything else)           → 0% of bankroll
+
+Bankroll is recalculated after every bet (win or lose). The percentage always 
+applies to the current bankroll, so stakes grow when winning and shrink when 
+losing — built-in risk management.
+
+EXAMPLES
+
+Bankroll €100.00:
+  Top Pick bet:    €3.00  (3%)
+  Value Pick bet:  €2.00  (2%)
+  Moderate bet:    €1.00  (1%)
+
+After a Top Pick win at 1.55 odds → new bankroll = 100 + (3 × 0.55) = €101.65
+After a Top Pick loss → new bankroll = 100 - 3 = €97.00
+
+WHY THIS WORKS BETTER
+
+1. Maximum per-bet risk is 3%, not 75% — a 10-bet losing streak costs ~30% 
+   of bankroll (recoverable), not 99%+ (game over).
+
+2. Higher confidence bets get more capital — capital is allocated efficiently 
+   to the highest-value opportunities.
+
+3. No forced escalation after losses — every bet is independent. No chasing.
+
+4. Compound growth — winning increases the bankroll, which increases future 
+   stakes. Losing does the opposite. This is the same mechanism that makes 
+   Kelly Criterion optimal.
+
+5. Easy to calculate — no sequence tables needed. Just multiply current 
+   bankroll by the tier percentage.

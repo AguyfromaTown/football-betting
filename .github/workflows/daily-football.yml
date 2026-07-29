@@ -1,0 +1,74 @@
+name: Daily Football Picks
+
+on:
+  schedule:
+    # Runs daily at 06:00 UTC (adjust for your timezone)
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Match date (YYYY-MM-DD, leave blank for today)'
+        required: false
+        default: ''
+      odds_min:
+        description: 'Min decimal odds'
+        required: false
+        default: '1.5'
+      odds_max:
+        description: 'Max decimal odds'
+        required: false
+        default: '1.6'
+      bankroll:
+        description: 'Bankroll override (optional)'
+        required: false
+        default: ''
+      leagues:
+        description: 'League filter (comma-separated, e.g. EPL,LaLiga,SerieA)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  run-picks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 google-genai python-dateutil
+
+      - name: Run football bot
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            ARGS="$ARGS --date ${{ github.event.inputs.date }}"
+          fi
+          ARGS="$ARGS --odds-min ${{ github.event.inputs.odds_min || '1.5' }}"
+          ARGS="$ARGS --odds-max ${{ github.event.inputs.odds_max || '1.6' }}"
+          if [ -n "${{ github.event.inputs.bankroll }}" ]; then
+            ARGS="$ARGS --bankroll ${{ github.event.inputs.bankroll }}"
+          fi
+          if [ -n "${{ github.event.inputs.leagues }}" ]; then
+            ARGS="$ARGS --leagues ${{ github.event.inputs.leagues }}"
+          fi
+          python football-bot/football_bot.py $ARGS
+
+      - name: Commit results
+        run: |
+          git config --local user.email "football-bot@github.com"
+          git config --local user.name "Football Bot"
+          git add -A
+          git diff --quiet && git diff --staged --quiet \
+            || git commit -m "Daily picks $(date +'%Y-%m-%d')"
+          git push
