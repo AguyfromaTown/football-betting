@@ -514,36 +514,65 @@ def parse_recommendations(report: str) -> list[dict]:
     """Parse the AI report to extract recommended bets."""
     recommendations = []
     current_type = None
+    last_team = None
+    last_opponent = None
+    last_tournament = None
 
     for line in report.split("\n"):
         line_lower = line.strip().lower()
+        line_clean = line.strip().lstrip("-*# ")
 
         if "## top picks" in line_lower or "## top pick" in line_lower:
             current_type = "Top Pick"
+            last_team = None
+            last_opponent = None
+            last_tournament = None
             continue
         if "## value picks" in line_lower or "## value pick" in line_lower:
             current_type = "Value Pick"
+            last_team = None
+            last_opponent = None
+            last_tournament = None
             continue
         if "## picks to avoid" in line_lower or "## avoid" in line_lower:
             current_type = None
+            last_team = None
+            last_opponent = None
+            last_tournament = None
+            continue
+        if line_lower.startswith("## "):
+            current_type = None
+            last_team = None
+            last_opponent = None
+            last_tournament = None
             continue
 
         if not current_type:
             continue
+        if not line_clean:
+            continue
 
-        line_clean = line.strip().lstrip("-*# ")
+        tournament_match = re.search(r'\(([A-Za-z\s]+)\)\s*$', line_clean)
+        if tournament_match:
+            last_tournament = tournament_match.group(1).strip()
+
+        team_match = re.search(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:vs|v\.|v)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', line_clean)
+        if team_match:
+            last_team = team_match.group(1).strip()
+            last_opponent = team_match.group(2).strip()
 
         odds_match = re.search(r'(?:odds?|at|@)\s*([1-9]\.[0-9]+)', line_lower)
-        team_match = re.search(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:vs|v\.|v)\s+', line_clean)
-
-        if team_match and odds_match:
+        if odds_match and last_team:
             try:
                 odds_val = float(odds_match.group(1))
-                recommendations.append({
-                    "team": team_match.group(1).strip(),
-                    "odds": odds_val,
-                    "grade": current_type,
-                })
+                if 1.01 <= odds_val <= 50:
+                    recommendations.append({
+                        "team": last_team,
+                        "opponent": last_opponent,
+                        "tournament": last_tournament,
+                        "odds": odds_val,
+                        "grade": current_type,
+                    })
             except ValueError:
                 pass
 
