@@ -514,80 +514,38 @@ def parse_recommendations(report: str) -> list[dict]:
     """Parse the AI report to extract recommended bets."""
     recommendations = []
     current_type = None
-    current_match = None
 
     for line in report.split("\n"):
-        line_stripped = line.strip().lower()
+        line_lower = line.strip().lower()
 
-        if "## top picks" in line_stripped:
+        if "## top picks" in line_lower or "## top pick" in line_lower:
             current_type = "Top Pick"
-            current_match = None
             continue
-        elif "## value picks" in line_stripped:
+        if "## value picks" in line_lower or "## value pick" in line_lower:
             current_type = "Value Pick"
-            current_match = None
             continue
-        elif "## picks to avoid" in line_stripped:
+        if "## picks to avoid" in line_lower or "## avoid" in line_lower:
             current_type = None
             continue
 
         if not current_type:
             continue
 
-        odds_match = re.search(r'(?:odds?|at)\s+([1-9]\.[0-9]+)', line_stripped)
-        team_match = re.search(
-            r'^\*{0,2}\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]*)*)\s+vs\s+', line
-        )
+        line_clean = line.strip().lstrip("-*# ")
 
-        if team_match:
-            current_match = team_match.group(1).strip()
+        odds_match = re.search(r'(?:odds?|at|@)\s*([1-9]\.[0-9]+)', line_lower)
+        team_match = re.search(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:vs|v\.|v)\s+', line_clean)
 
-        if odds_match and current_match:
+        if team_match and odds_match:
             try:
                 odds_val = float(odds_match.group(1))
                 recommendations.append({
-                    "team": current_match,
+                    "team": team_match.group(1).strip(),
                     "odds": odds_val,
                     "grade": current_type,
                 })
-                current_match = None
             except ValueError:
                 pass
-
-    # Fallback: scan for structured pick patterns
-    if not recommendations:
-        for line in report.split("\n"):
-            line_stripped = line.strip()
-            if not line_stripped:
-                continue
-
-            grade = None
-            if "**Top Pick**" in line_stripped:
-                grade = "Top Pick"
-            elif "**Value Pick**" in line_stripped:
-                grade = "Value Pick"
-
-            if grade:
-                team = None
-                odds = None
-
-                p_match = re.search(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:vs|v\.)\s+', line_stripped)
-                if p_match:
-                    team = p_match.group(1).strip()
-
-                o_match = re.search(r'(?:odds?|at|@)\s*([1-9]\.[0-9]+)', line_stripped)
-                if o_match:
-                    try:
-                        odds = float(o_match.group(1))
-                    except ValueError:
-                        pass
-
-                if team:
-                    recommendations.append({
-                        "team": team,
-                        "odds": odds,
-                        "grade": grade,
-                    })
 
     return recommendations
 
@@ -615,7 +573,11 @@ def log_bets(
                 break
 
         if not match_info:
-            continue
+            match_info = {
+                "team1": rec.get("team", "Unknown"),
+                "team2": rec.get("opponent", "Unknown"),
+                "tournament": rec.get("tournament", "Unknown Competition"),
+            }
 
         if current_balance is not None:
             if rec["grade"] == "Top Pick":
