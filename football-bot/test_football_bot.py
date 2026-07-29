@@ -43,6 +43,46 @@ class FootballBotTests(unittest.TestCase):
             ],
         )
 
+    def test_parser_accepts_team_name_before_odds_and_parentheses(self):
+        report = """## TOP PICKS
+1. **Utah Royals vs Washington Spirit**
+   - Tournament: NWSL
+   - Odds: Utah Royals 2.75
+
+2. **Cienciano del Cusco vs Lanús**
+   - Tournament: CONMEBOL Sudamericana
+   - Odds: Cienciano del Cusco 2.20
+
+## VALUE PICKS
+1. **Instituto (Córdoba) vs Platense**
+   - Tournament: Argentine LPF
+   - Odds: Instituto (Córdoba) 2.05
+"""
+        picks = bot.parse_recommendations(report)
+        self.assertEqual(
+            [
+                (p["team"], p["opponent"], p["tournament"], p["odds"], p["grade"])
+                for p in picks
+            ],
+            [
+                ("Utah Royals", "Washington Spirit", "NWSL", 2.75, "Top Pick"),
+                (
+                    "Cienciano del Cusco",
+                    "Lanús",
+                    "CONMEBOL Sudamericana",
+                    2.2,
+                    "Top Pick",
+                ),
+                (
+                    "Instituto (Córdoba)",
+                    "Platense",
+                    "Argentine LPF",
+                    2.05,
+                    "Value Pick",
+                ),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

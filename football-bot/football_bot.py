@@ -622,7 +622,8 @@ def parse_recommendations(report: str) -> list[dict]:
 
     for line in report.split("\n"):
         line_lower = line.strip().lower()
-        line_clean = line.strip().lstrip("-*# ")
+        line_clean = re.sub(r"\*+", "", line.strip().lstrip("-# ")).strip()
+        line_clean = re.sub(r"^\d+[.)]\s*", "", line_clean)
 
         if "## top picks" in line_lower or "## top pick" in line_lower:
             current_type = "Top Pick"
@@ -654,20 +655,22 @@ def parse_recommendations(report: str) -> list[dict]:
         if not line_clean:
             continue
 
-        tournament_match = re.search(r'\(([A-Za-z\s]+)\)\s*$', line_clean)
+        tournament_match = re.search(r'^tournament\s*:\s*(.+)$', line_clean, re.IGNORECASE)
         if tournament_match:
             last_tournament = tournament_match.group(1).strip()
 
         team_match = re.search(
-            r'(.+?)\s+v(?:s)?\.?\s+(.+?)(?:\s+\(|$)',
+            r'^(.+?)\s+v(?:s)?\.?\s+(.+)$',
             line_clean,
             flags=re.IGNORECASE,
         )
         if team_match:
-            last_team = re.sub(r'^\d+[.)]\s*|\*+', '', team_match.group(1)).strip()
-            last_opponent = re.sub(r'\*+$', '', team_match.group(2)).strip()
+            last_team = team_match.group(1).strip()
+            last_opponent = team_match.group(2).strip()
 
-        odds_match = re.search(r'(?:odds?|at|@)\s*[:=-]?\s*([1-9]\.[0-9]+)', line_lower)
+        odds_match = None
+        if re.match(r'^odds?\s*:', line_clean, re.IGNORECASE):
+            odds_match = re.search(r'\b([1-9]\d*\.\d+)\b', line_clean)
         if odds_match and last_team:
             try:
                 odds_val = float(odds_match.group(1))
