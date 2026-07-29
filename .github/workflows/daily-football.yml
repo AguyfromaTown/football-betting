@@ -17,7 +17,7 @@ on:
       odds_max:
         description: 'Max decimal odds'
         required: false
-        default: '1.6'
+        default: '3.0'
       bankroll:
         description: 'Bankroll override (optional)'
         required: false
@@ -55,7 +55,7 @@ jobs:
             ARGS="$ARGS --date ${{ github.event.inputs.date }}"
           fi
           ARGS="$ARGS --odds-min ${{ github.event.inputs.odds_min || '1.5' }}"
-          ARGS="$ARGS --odds-max ${{ github.event.inputs.odds_max || '1.6' }}"
+          ARGS="$ARGS --odds-max ${{ github.event.inputs.odds_max || '3.0' }}"
           if [ -n "${{ github.event.inputs.bankroll }}" ]; then
             ARGS="$ARGS --bankroll ${{ github.event.inputs.bankroll }}"
           fi

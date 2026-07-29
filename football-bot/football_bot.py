@@ -1,6 +1,6 @@
 """
 Football Betting Bot — Automated daily picks pipeline.
-Runs the 3-stage analysis via Google Gemini API and logs results.
+Runs the 3-stage analysis via Groq API (Llama 3) and logs results.
 Designed for GitHub Actions execution.
 """
 
@@ -53,7 +53,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Football betting bot")
     parser.add_argument("--date", default=None, help="Match date (YYYY-MM-DD)")
     parser.add_argument("--odds-min", type=float, default=1.5, help="Min decimal odds")
-    parser.add_argument("--odds-max", type=float, default=1.6, help="Max decimal odds")
+    parser.add_argument("--odds-max", type=float, default=3.0, help="Max decimal odds")
     parser.add_argument("--bankroll", type=float, default=None, help="Override bankroll")
     parser.add_argument("--force", action="store_true", help="Run even if bets already logged for this date")
     parser.add_argument("--leagues", default=None, help="Comma-separated league filter (e.g., EPL,LaLiga,SerieA)")
@@ -124,10 +124,10 @@ def parse_league_level(url: str, name: str) -> str:
     return "Other"
 
 
-def fetch_matches_from_fbref(date_str: str) -> list[dict]:
-    """Fetch football matches from FBref scores page."""
+def fetch_matches_from_espn(date_str: str) -> list[dict]:
+    """Fetch football matches from ESPN FC fixtures page."""
     dt = datetime.strptime(date_str, "%Y-%m-%d")
-    url = f"https://fbref.com/en/matches/{dt.year}-{dt.month:02d}-{dt.day:02d}"
+    url = f"https://www.espn.com/soccer/fixtures/_/date/{dt.year}{dt.month:02d}{dt.day:02d}"
     html = fetch(url)
     if not html:
         return []
@@ -135,33 +135,33 @@ def fetch_matches_from_fbref(date_str: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     matches = []
 
-    league_tables = soup.select("div.matchup, table.stats_table")
-    for table in soup.select("div.matchup"):
-        league_header = table.find_previous("h2")
-        league_name = league_header.get_text(strip=True) if league_header else "Unknown League"
+    league_containers = soup.select("div.league-container, section.league-container")
+    for container in league_containers:
+        league_el = container.select_one("h2, h3.league-name")
+        league_name = league_el.get_text(strip=True) if league_el else "Unknown League"
 
-        teams = table.select("td.team, div.team, a.team")
-        scores = table.select("td.score, div.score")
+        game_cards = container.select("li.event, div.event, div.game-card")
+        for card in game_cards:
+            teams_el = card.select("span.team-name, a.team-name, span.abbrev")
+            if len(teams_el) >= 2:
+                t1 = teams_el[0].get_text(strip=True)
+                t2 = teams_el[1].get_text(strip=True)
+                matches.append({
+                    "team1": t1,
+                    "team2": t2,
+                    "score": "",
+                    "tournament": league_name,
+                    "level": parse_league_level(url, league_name),
+                    "source": url,
+                })
 
-        if len(teams) >= 2:
-            t1 = teams[0].get_text(strip=True)
-            t2 = teams[1].get_text(strip=True)
-            score = scores[0].get_text(strip=True) if scores else ""
-            matches.append({
-                "team1": t1,
-                "team2": t2,
-                "score": score,
-                "tournament": league_name,
-                "level": parse_league_level(url, league_name),
-                "source": url,
-            })
     return matches
 
 
-def fetch_matches_from_flashscore(date_str: str) -> list[dict]:
-    """Fetch football matches from Flashscore (via alternative if blocked)."""
+def fetch_matches_from_bbc(date_str: str) -> list[dict]:
+    """Fetch football matches from BBC Sport."""
     dt = datetime.strptime(date_str, "%Y-%m-%d")
-    url = f"https://www.flashscore.com/football/{dt.year}-{dt.month:02d}-{dt.day:02d}/"
+    url = f"https://www.bbc.com/sport/football/scores-fixtures/{dt.year}-{dt.month:02d}-{dt.day:02d}"
     html = fetch(url)
     if not html:
         return []
@@ -169,40 +169,76 @@ def fetch_matches_from_flashscore(date_str: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     matches = []
 
-    event_cards = soup.select("div.event__match, div.soccerMatch")
-    for card in event_cards:
-        tournament_el = card.select_one("div.event__title, span.tournament-name")
-        tournament = tournament_el.get_text(strip=True) if tournament_el else "Unknown"
+    fixture_wrappers = soup.select("div[data-testid='fixture'], div.fixture, div.sp-c-fixture")
+    for wrapper in fixture_wrappers:
+        league_el = wrapper.find_previous(["h2", "h3", "legend"])
+        league_name = league_el.get_text(strip=True) if league_el else "Unknown League"
 
-        home_el = card.select_one("div.event__homeParticipant, span.home-name")
-        away_el = card.select_one("div.event__awayParticipant, span.away-name")
-
-        if home_el and away_el:
-            t1 = home_el.get_text(strip=True)
-            t2 = away_el.get_text(strip=True)
+        teams_el = wrapper.select("span.sp-c-fixture__team-name, span[data-testid='team-name']")
+        if len(teams_el) >= 2:
+            t1 = teams_el[0].get_text(strip=True)
+            t2 = teams_el[1].get_text(strip=True)
             matches.append({
                 "team1": t1,
                 "team2": t2,
                 "score": "",
-                "tournament": tournament,
-                "level": parse_league_level(url, tournament),
+                "tournament": league_name,
+                "level": parse_league_level(url, league_name),
                 "source": url,
             })
 
     return matches
+
+
+def fetch_matches_from_fotmob_api(date_str: str) -> list[dict]:
+    """Fetch football matches from FotMob-based API (free, no key)."""
+    api_urls = [
+        f"https://football-live-api.vercel.app/api/fotmob/matches/date/{date_str}",
+    ]
+    for api_url in api_urls:
+        html = fetch(api_url)
+        if not html:
+            continue
+        try:
+            data = json.loads(html)
+            matches = []
+            if "matches" in data:
+                for match in data["matches"]:
+                    league_name = match.get("league", {}).get("name", "Unknown League")
+                    for fixture in match.get("fixtures", []):
+                        t1 = fixture.get("home", {}).get("name", "")
+                        t2 = fixture.get("away", {}).get("name", "")
+                        if t1 and t2:
+                            matches.append({
+                                "team1": t1,
+                                "team2": t2,
+                                "score": "",
+                                "tournament": league_name,
+                                "level": parse_league_level(api_url, league_name),
+                                "source": api_url,
+                            })
+            if matches:
+                return matches
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return []
 
 
 def fetch_matches_all(date_str: str, leagues: list[str] | None = None) -> list[dict]:
     """Aggregate matches from all football sources."""
     all_matches = []
-    log("Fetching matches from FBref...")
-    all_matches.extend(fetch_matches_from_fbref(date_str))
-    log(f"  Found {len(all_matches)} matches from FBref")
-    log("Fetching matches from Flashscore...")
-    all_matches.extend(fetch_matches_from_flashscore(date_str))
-    log(f"  Found {len(all_matches)} total matches so far")
+    log("Fetching matches from ESPN...")
+    all_matches.extend(fetch_matches_from_espn(date_str))
+    log(f"  Found {sum(1 for _ in all_matches)} from ESPN")
+    if not all_matches:
+        log("Fetching matches from BBC Sport...")
+        all_matches.extend(fetch_matches_from_bbc(date_str))
+        log(f"  Found {sum(1 for _ in all_matches)} from BBC")
+    if not all_matches:
+        log("Fetching matches from FotMob API...")
+        all_matches.extend(fetch_matches_from_fotmob_api(date_str))
+        log(f"  Found {sum(1 for _ in all_matches)} from FotMob")
 
-    # Deduplicate by team1+team2
     seen = set()
     unique = []
     for m in all_matches:
@@ -212,7 +248,6 @@ def fetch_matches_all(date_str: str, leagues: list[str] | None = None) -> list[d
             unique.append(m)
     log(f"Total unique matches: {len(unique)}")
 
-    # Filter by leagues if specified
     if leagues:
         filtered = []
         for m in unique:
@@ -295,26 +330,16 @@ def attach_odds(matches: list[dict], odds_min: float, odds_max: float) -> list[d
 
 
 def fetch_team_profile(team_name: str) -> str:
-    """Fetch team stats from FBref."""
+    """Fetch team info from web sources."""
     name_part = team_name.lower().replace(" ", "-").replace("'", "").replace(".", "")
-    url = f"https://fbref.com/en/search/search.fcgi?search={name_part}"
+    # Try Transfermarkt search
+    url = f"https://www.transfermarkt.com/schnellsuche/ergebnis/schnellsuche?query={name_part}"
     html = fetch(url)
     if html:
         soup = BeautifulSoup(html, "html.parser")
-        tables = soup.select("table")
-        stats_text = []
-        for table in tables[:3]:
-            rows = table.select("tr")
-            table_data = []
-            for row in rows:
-                cells = row.select("td, th")
-                row_text = " | ".join(c.get_text(strip=True) for c in cells)
-                if row_text:
-                    table_data.append(row_text)
-            if table_data:
-                stats_text.append("\n".join(table_data))
-        result = "\n\n".join(stats_text) if stats_text else html[:3000]
-        return result[:4000]
+        texts = [p.get_text(strip=True) for p in soup.select("p, h1, h2")[:20]]
+        result = "\n".join(texts)
+        return result[:2000] if result else "Profile not available"
     return "Profile not available"
 
 
@@ -347,7 +372,7 @@ Matches in odds range [{odds_min}-{odds_max}]:
 
 {matches_text}
 
-## Team Profile Data (from FBref)
+## Team Profile Data
 
 """
 
@@ -363,10 +388,10 @@ Matches in odds range [{odds_min}-{odds_max}]:
 
 ## ANALYSIS INSTRUCTIONS
 
-You MUST now perform the full 3-stage pipeline using ONLY the data above and your own football knowledge.
+You MUST now perform the full 3-stage pipeline. You have extensive football knowledge built into your training data (up to 2025). Use that knowledge heavily — league tables, team form, historical performances, player quality, tactical styles, recent results. If the scraped match data above is empty, DO NOT just say "no data available" — instead, search your own knowledge for top-tier matches happening near {date_str} that would have odds in the {odds_min}-{odds_max} range, and analyze those.
 
 ### STAGE 1 — Verification & Refinement
-Review the match data above. Verify the leagues and identify any issues. Cross-reference with your knowledge of football schedules.
+Review the match data above. If no data was scraped, use your training knowledge to identify the most notable football matches around {date_str} across top European leagues (EPL, LaLiga, Bundesliga, Serie A, Ligue 1, UCL, UEL, etc.) and lower divisions. List the teams, approximate odds, and competitions.
 
 ### STAGE 2 — Performance Analysis
 For each team whose odds fall within {odds_min}-{odds_max}, analyze:
@@ -400,7 +425,8 @@ Run the Red Flag checklist:
 - Poor H2H record?
 - Manager under pressure / recent sacking?
 - Odds lengthened significantly?
-- xG underperformance streak?
+- Expected goals (xG) underperformance streak?
+- Playing away against a strong home side?
 
 ### STAGE 3 — Recommendations
 
