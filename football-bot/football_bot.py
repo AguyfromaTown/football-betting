@@ -28,7 +28,7 @@ REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0.0.0 Safari/537.36"
+        "Chrome/128.0.0.0 Safari/537.36"
     )
 }
 
@@ -458,7 +458,7 @@ def call_ai(prompt: str, api_key: str) -> str:
 
     log("Calling Gemini API (free)...")
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-2.0-flash",
         contents=prompt,
         config={
             "max_output_tokens": 8192,
