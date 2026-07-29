@@ -44,11 +44,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4 google-genai python-dateutil
+          pip install requests beautifulsoup4 python-dateutil
 
       - name: Run football bot
         env:
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           ARGS=""
           if [ -n "${{ github.event.inputs.date }}" ]; then

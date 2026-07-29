@@ -451,24 +451,35 @@ Direct and analytical. Quantify confidence. No marketing language. Aim for 500-8
 
 
 def call_ai(prompt: str, api_key: str) -> str:
-    """Call Google Gemini API (free tier) with the constructed prompt."""
-    import google.genai as genai
+    """Call Groq API (Llama 3) with the constructed prompt."""
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 8192,
+        "temperature": 0.3,
+    }
 
-    client = genai.Client(api_key=api_key)
-
-    log("Calling Gemini API (free)...")
-    response = client.models.generate_content(
-        model="gemini-1.5-flash",
-        contents=prompt,
-        config={
-            "max_output_tokens": 8192,
-            "temperature": 0.3,
-        },
-    )
-
-    content = response.text if response.text else ""
-    log(f"Gemini response: {len(content)} chars")
-    return content
+    log("Calling Groq API (Llama 3)...")
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+        log(f"Groq response: {len(content)} chars")
+        return content
+    except requests.RequestException as e:
+        log(f"Groq API error: {e}")
+        if hasattr(e, "response") and e.response is not None:
+            log(f"Response body: {e.response.text[:500]}")
+        raise
 
 
 # ─── Stage 4: Logging ───────────────────────────────────────────────
@@ -685,10 +696,10 @@ def main():
     log("Building analysis prompt...")
     prompt = build_prompt(date_str, qualified, bankroll, odds_min, odds_max)
 
-    api_key = os.environ.get("GOOGLE_API_KEY")
+    api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
-        log("ERROR: No API key. Set GOOGLE_API_KEY env var.")
-        log("Get a free key at https://aistudio.google.com/apikey")
+        log("ERROR: No API key. Set GROQ_API_KEY env var.")
+        log("Get a free key at https://console.groq.com/keys")
         sys.exit(1)
 
     report = call_ai(prompt, api_key)
