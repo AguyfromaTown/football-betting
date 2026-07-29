@@ -18,6 +18,9 @@ SPEC.loader.exec_module(bot)
 
 
 class FootballBotTests(unittest.TestCase):
+    def test_completion_limit_fits_groq_tpm_budget(self):
+        self.assertLessEqual(bot.MAX_COMPLETION_TOKENS, 4096)
+
     def test_american_to_decimal(self):
         self.assertEqual(bot.american_to_decimal(115), 2.15)
         self.assertEqual(bot.american_to_decimal(-200), 1.5)

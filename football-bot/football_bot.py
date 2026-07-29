@@ -24,6 +24,7 @@ LOG_FILE = REPO_ROOT / "bets-log.csv"
 REPORTS_DIR = REPO_ROOT / "reports"
 
 REQUEST_TIMEOUT = 30
+MAX_COMPLETION_TOKENS = 4096
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -478,13 +479,11 @@ Matches in odds range [{odds_min}-{odds_max}]:
 
 """
 
-    seen_teams = set()
-    for m in matches:
-        for team in [m["team1"], m["team2"]]:
-            if team.lower() not in seen_teams:
-                seen_teams.add(team.lower())
-                profile = fetch_team_profile(team)
-                prompt += f"\n--- {team} Profile ---\n{profile}\n"
+    prompt += (
+        "\nNo independently verified current team profiles were supplied. "
+        "Treat missing form, injury, and lineup information as uncertainty; "
+        "do not manufacture it.\n"
+    )
 
     prompt += f"""
 
@@ -583,7 +582,7 @@ def call_ai(prompt: str, api_key: str) -> str:
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 8192,
+        "max_tokens": MAX_COMPLETION_TOKENS,
         "temperature": 0.3,
     }
 
