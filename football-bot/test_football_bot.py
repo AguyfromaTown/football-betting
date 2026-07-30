@@ -42,7 +42,7 @@ class FootballBotTests(unittest.TestCase):
             }],
         )
 
-    def test_validation_downgrades_incorrect_top_pick_claim(self):
+    def test_validation_rejects_ai_pick_when_python_baseline_is_negative(self):
         candidates = [{
             "team": "PAOK",
             "score": 8.5,
@@ -53,12 +53,15 @@ class FootballBotTests(unittest.TestCase):
             "team2": "Dynamo Kyiv",
             "home_odds": 1.8,
             "away_odds": 4.5,
+            "draw_odds": 3.5,
+            "home_form": "WWLLD",
+            "away_form": "LLLDD",
+            "home_record": "10-5-5",
+            "away_record": "5-5-10",
         }]
         validated = bot.validate_recommendations(candidates, matches)
 
-        self.assertEqual(len(validated), 1)
-        self.assertEqual(validated[0]["grade"], "Moderate Pick")
-        self.assertAlmostEqual(validated[0]["ev"], 0.0494)
+        self.assertEqual(validated, [])
 
     def test_validation_uses_verified_team_odds_and_grade(self):
         candidates = [{
@@ -69,16 +72,62 @@ class FootballBotTests(unittest.TestCase):
         matches = [{
             "team1": "Dundee United",
             "team2": "Rangers",
-            "home_odds": 5.25,
-            "away_odds": 1.541,
+            "home_odds": 5.5,
+            "away_odds": 1.526,
+            "draw_odds": 4.2,
+            "home_form": "LLLLL",
+            "away_form": "WWWWW",
+            "home_record": "3-4-13",
+            "away_record": "15-3-2",
             "tournament": "SPFL Premiership",
         }]
         validated = bot.validate_recommendations(candidates, matches)
 
         self.assertEqual(len(validated), 1)
-        self.assertEqual(validated[0]["grade"], "Top Pick")
-        self.assertEqual(validated[0]["odds"], 1.541)
-        self.assertAlmostEqual(validated[0]["ev"], 0.27903)
+        self.assertEqual(validated[0]["grade"], "Value Pick")
+        self.assertEqual(validated[0]["odds"], 1.526)
+        self.assertAlmostEqual(validated[0]["ev"], 0.052121)
+        self.assertAlmostEqual(
+            validated[0]["assessed_probability"],
+            0.6894633,
+        )
+
+    def test_statistical_baseline_devigs_three_way_market(self):
+        match = {
+            "team1": "Home",
+            "team2": "Away",
+            "home_odds": 2.0,
+            "draw_odds": 4.0,
+            "away_odds": 4.0,
+            "home_form": "WWWWW",
+            "away_form": "LLLLL",
+            "home_record": "8-1-1",
+            "away_record": "1-1-8",
+        }
+        baseline = bot.calculate_team_baseline(match, "Home")
+
+        self.assertAlmostEqual(baseline["market_probability"], 0.5)
+        self.assertEqual(baseline["evidence_adjustment"], 0.08)
+        self.assertAlmostEqual(baseline["assessed_probability"], 0.58)
+        self.assertAlmostEqual(baseline["ev"], 0.16)
+
+    def test_statistical_candidate_scan_cannot_be_omitted_by_ai(self):
+        match = {
+            "team1": "Home",
+            "team2": "Away",
+            "home_odds": 2.0,
+            "draw_odds": 4.0,
+            "away_odds": 4.0,
+            "home_form": "WWWWW",
+            "away_form": "LLLLL",
+            "home_record": "8-1-1",
+            "away_record": "1-1-8",
+        }
+        candidates = bot.build_statistical_candidates([match], 1.5, 3.0)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["team"], "Home")
+        self.assertAlmostEqual(candidates[0]["assessed_probability"], 0.58)
 
     def test_team_normalization_handles_missing_accents(self):
         self.assertEqual(

@@ -139,6 +139,14 @@ def american_to_decimal(value) -> float | None:
     return round(1 + 100 / abs(american), 3)
 
 
+def competitor_record(competitor: dict) -> str | None:
+    """Return ESPN's total W-D-L record summary when present."""
+    for record in competitor.get("records") or []:
+        if record.get("type") == "total" and record.get("summary"):
+            return str(record["summary"])
+    return None
+
+
 def fetch_matches_from_espn_api(date_str: str) -> list[dict]:
     """Fetch fixtures and available moneyline odds from ESPN's scoreboard API."""
     dt = datetime.strptime(date_str, "%Y-%m-%d")
@@ -185,6 +193,7 @@ def fetch_matches_from_espn_api(date_str: str) -> list[dict]:
         moneyline = odds_data.get("moneyline") or {}
         home_american = (moneyline.get("home") or {}).get("close", {}).get("odds")
         away_american = (moneyline.get("away") or {}).get("close", {}).get("odds")
+        draw_american = (odds_data.get("drawOdds") or {}).get("moneyLine")
 
         matches.append({
             "team1": home_name,
@@ -195,6 +204,11 @@ def fetch_matches_from_espn_api(date_str: str) -> list[dict]:
             "source": url,
             "home_odds": american_to_decimal(home_american),
             "away_odds": american_to_decimal(away_american),
+            "draw_odds": american_to_decimal(draw_american),
+            "home_form": home.get("form") or None,
+            "away_form": away.get("form") or None,
+            "home_record": competitor_record(home),
+            "away_record": competitor_record(away),
             "odds_source": (odds_data.get("provider") or {}).get("displayName", "ESPN"),
         })
     return matches
@@ -444,6 +458,125 @@ def fetch_team_profile(team_name: str) -> str:
 
 # ─── Stage 2 & 3: AI Analysis ───────────────────────────────────────
 
+def record_points_rate(summary: str | None) -> float | None:
+    """Convert an ESPN soccer W-D-L summary to points earned / points available."""
+    if not summary:
+        return None
+    match = re.fullmatch(r"\s*(\d+)-(\d+)-(\d+)\s*", summary)
+    if not match:
+        return None
+    wins, draws, losses = (int(value) for value in match.groups())
+    played = wins + draws + losses
+    return (3 * wins + draws) / (3 * played) if played else None
+
+
+def form_points_rate(form: str | None) -> float | None:
+    """Convert a compact form string such as WWLLD to a normalized points rate."""
+    results = [char for char in (form or "").upper() if char in "WDL"]
+    if not results:
+        return None
+    points = sum(
+        3 if result == "W" else 1 if result == "D" else 0
+        for result in results
+    )
+    return points / (3 * len(results))
+
+
+def calculate_team_baseline(match: dict, team: str) -> dict | None:
+    """Estimate win probability from the de-vigged 3-way market and ESPN evidence."""
+    home_odds = match.get("home_odds")
+    away_odds = match.get("away_odds")
+    draw_odds = match.get("draw_odds")
+    if not all(
+        isinstance(odds, (int, float)) and odds > 1
+        for odds in (home_odds, away_odds, draw_odds)
+    ):
+        return None
+
+    team_key = normalize_team_name(team)
+    if team_key == normalize_team_name(match["team1"]):
+        team_odds = float(home_odds)
+        team_form = form_points_rate(match.get("home_form"))
+        opponent_form = form_points_rate(match.get("away_form"))
+        team_record = record_points_rate(match.get("home_record"))
+        opponent_record = record_points_rate(match.get("away_record"))
+    elif team_key == normalize_team_name(match["team2"]):
+        team_odds = float(away_odds)
+        team_form = form_points_rate(match.get("away_form"))
+        opponent_form = form_points_rate(match.get("home_form"))
+        team_record = record_points_rate(match.get("away_record"))
+        opponent_record = record_points_rate(match.get("home_record"))
+    else:
+        return None
+
+    inverse_total = (
+        1 / float(home_odds)
+        + 1 / float(away_odds)
+        + 1 / float(draw_odds)
+    )
+    market_probability = (1 / team_odds) / inverse_total
+
+    evidence = []
+    if team_form is not None and opponent_form is not None:
+        evidence.append((0.65, team_form - opponent_form))
+    if team_record is not None and opponent_record is not None:
+        evidence.append((0.35, team_record - opponent_record))
+    if not evidence:
+        return None
+
+    weight_total = sum(weight for weight, _ in evidence)
+    strength_difference = sum(
+        weight * difference for weight, difference in evidence
+    ) / weight_total
+    evidence_adjustment = max(-0.08, min(0.08, strength_difference * 0.10))
+    assessed_probability = max(
+        0.02,
+        min(0.95, market_probability + evidence_adjustment),
+    )
+    ev = assessed_probability * team_odds - 1
+    score = max(0.0, min(10.0, 6.0 + max(0.0, ev) * 30))
+
+    return {
+        "market_probability": market_probability,
+        "evidence_adjustment": evidence_adjustment,
+        "assessed_probability": assessed_probability,
+        "ev": ev,
+        "score": score,
+        "team_odds": team_odds,
+        "team_form_rate": team_form,
+        "opponent_form_rate": opponent_form,
+        "team_record_rate": team_record,
+        "opponent_record_rate": opponent_record,
+    }
+
+
+def build_statistical_candidates(
+    matches: list[dict],
+    odds_min: float,
+    odds_max: float,
+) -> list[dict]:
+    """Scan every eligible team so AI omissions cannot hide a statistical edge."""
+    candidates = []
+    for match in matches:
+        for team, opponent in (
+            (match["team1"], match["team2"]),
+            (match["team2"], match["team1"]),
+        ):
+            baseline = calculate_team_baseline(match, team)
+            if (
+                baseline
+                and odds_min <= baseline["team_odds"] <= odds_max
+                and baseline["ev"] > 0
+            ):
+                candidates.append({
+                    "team": team,
+                    "opponent": opponent,
+                    "score": baseline["score"],
+                    "assessed_probability": baseline["assessed_probability"],
+                })
+    return candidates
+
+
 def build_prompt(
     date_str: str,
     matches: list[dict],
@@ -456,14 +589,38 @@ def build_prompt(
     match_lines = []
     for i, m in enumerate(matches, 1):
         market_odds = (
-            f"{m['team1']} {m['home_odds']:.2f}, {m['team2']} {m['away_odds']:.2f}"
-            if m.get("home_odds") is not None and m.get("away_odds") is not None
+            f"{m['team1']} {m['home_odds']:.2f}, "
+            f"Draw {m['draw_odds']:.2f}, "
+            f"{m['team2']} {m['away_odds']:.2f}"
+            if m.get("home_odds") is not None
+            and m.get("away_odds") is not None
+            and m.get("draw_odds") is not None
             else str(m.get("odds", "N/A"))
         )
+        home_baseline = calculate_team_baseline(m, m["team1"])
+        away_baseline = calculate_team_baseline(m, m["team2"])
+
+        def baseline_text(team: str, baseline: dict | None) -> str:
+            if not baseline:
+                return f"  Python baseline for {team}: unavailable"
+            return (
+                f"  Python baseline for {team}: market fair "
+                f"{baseline['market_probability']:.1%}, evidence adjustment "
+                f"{baseline['evidence_adjustment']:+.1%}, assessed "
+                f"{baseline['assessed_probability']:.1%}, "
+                f"EV {baseline['ev']:.2%}, score {baseline['score']:.2f}"
+            )
+
         match_lines.append(
             f"Match {i}: {m['team1']} vs {m['team2']}\n"
             f"  Tournament: {m['tournament']} ({m['level']})\n"
             f"  Moneyline odds: {market_odds} (source: {m.get('odds_source', 'N/A')})\n"
+            f"  ESPN evidence: {m['team1']} form={m.get('home_form') or 'N/A'}, "
+            f"record={m.get('home_record') or 'N/A'}; "
+            f"{m['team2']} form={m.get('away_form') or 'N/A'}, "
+            f"record={m.get('away_record') or 'N/A'}\n"
+            f"{baseline_text(m['team1'], home_baseline)}\n"
+            f"{baseline_text(m['team2'], away_baseline)}\n"
         )
 
     matches_text = "\n".join(match_lines) if match_lines else "No matches found in odds range."
@@ -515,10 +672,12 @@ Then calculate: Total = (Form×0.25) + (HomeAway×0.25) + (H2H×0.15) + (Injury�
 
 Grade: 8.5-10 Elite | 7.0-8.4 Strong | 5.5-6.9 Moderate | <5.5 Weak
 
-For each candidate, calculate:
-- Implied Probability = 1 / odds
-- Your assessed probability
-- Expected Value = (assessed_prob × odds) - 1
+Python has supplied a probability baseline for each team when the full 3-way
+market, form, and season record were available. It de-vigged the home/draw/away
+prices and applied a bounded evidence adjustment. Treat the Python probability,
+score, and EV as authoritative. Do not replace them with your own arithmetic.
+Do not recommend a team whose Python baseline is unavailable or has non-positive
+EV.
 
 Run the Red Flag checklist:
 - Lost 3+ consecutive matches?
@@ -591,9 +750,10 @@ End the report with exactly one fenced JSON array under this heading:
 ]
 ```
 
-Include only teams that you recommend after calculating EV. Use a probability
-between 0 and 1. Do not include odds, EV, grade, or stake in this JSON because
-Python will use the verified market odds and calculate those values itself.
+Copy the Python baseline score and assessed probability exactly. Include only
+teams whose Python baseline EV is positive. Do not include odds, EV, grade, or
+stake in this JSON because Python will use the verified market odds and
+recalculate those values itself.
 Use `[]` when no candidate is supported. The narrative sections must agree with
 this array. Never manufacture current form, H2H, injuries, lineups, or xG.
 """
@@ -787,6 +947,21 @@ def validate_recommendations(
             log(f"  Rejected {team or 'unknown'}: no verified team-specific odds")
             continue
 
+        baseline = calculate_team_baseline(match_info, verified_team)
+        if not baseline:
+            log(f"  Rejected {team or 'unknown'}: statistical baseline unavailable")
+            continue
+        if (
+            abs(probability - baseline["assessed_probability"]) > 0.005
+            or abs(score - baseline["score"]) > 0.05
+        ):
+            log(
+                f"  Ignored AI estimate for {team}: using Python baseline "
+                f"probability {baseline['assessed_probability']:.2%}, "
+                f"score {baseline['score']:.2f}"
+            )
+        probability = baseline["assessed_probability"]
+        score = baseline["score"]
         ev = probability * float(verified_odds) - 1
         if score > 8 and ev > 0.08:
             grade = "Top Pick"
@@ -804,10 +979,13 @@ def validate_recommendations(
         validated.append({
             **recommendation,
             "team": verified_team,
+            "score": score,
+            "assessed_probability": probability,
             "odds": float(verified_odds),
             "ev": ev,
             "grade": grade,
             "match": match_info,
+            "baseline": baseline,
         })
         log(
             f"  Validated {team}: {grade}, score {score:.2f}, EV {ev:.2%}"
@@ -996,8 +1174,22 @@ def main():
 
     report = call_ai(prompt, api_key)
 
-    candidates = parse_recommendations(report)
-    log(f"Parsed {len(candidates)} recommendation candidates from report")
+    ai_candidates = parse_recommendations(report)
+    log(f"Parsed {len(ai_candidates)} AI recommendation candidates from report")
+    statistical_candidates = build_statistical_candidates(
+        qualified,
+        odds_min,
+        odds_max,
+    )
+    log(f"Found {len(statistical_candidates)} positive-EV statistical candidates")
+    candidates_by_team = {
+        normalize_team_name(candidate["team"]): candidate
+        for candidate in ai_candidates
+    }
+    for candidate in statistical_candidates:
+        candidates_by_team[normalize_team_name(candidate["team"])] = candidate
+    candidates = list(candidates_by_team.values())
+    log(f"Validating {len(candidates)} unique recommendation candidates")
     recommendations = validate_recommendations(candidates, qualified)
     log(f"Validated {len(recommendations)} recommendations")
     authorized_bets = [
