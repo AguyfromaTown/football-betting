@@ -1,8 +1,10 @@
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 # Keep these unit tests independent of optional runtime packages.
@@ -18,6 +20,110 @@ SPEC.loader.exec_module(bot)
 
 
 class FootballBotTests(unittest.TestCase):
+    def test_structured_picks_are_parsed(self):
+        report = """## MACHINE READABLE PICKS
+```json
+[
+  {
+    "team": "Juventus",
+    "opponent": "Nice",
+    "score": 8.5,
+    "assessed_probability": 0.85
+  }
+]
+```"""
+        self.assertEqual(
+            bot.parse_recommendations(report),
+            [{
+                "team": "Juventus",
+                "opponent": "Nice",
+                "score": 8.5,
+                "assessed_probability": 0.85,
+            }],
+        )
+
+    def test_validation_downgrades_incorrect_top_pick_claim(self):
+        candidates = [{
+            "team": "PAOK",
+            "score": 8.5,
+            "assessed_probability": 0.583,
+        }]
+        matches = [{
+            "team1": "PAOK",
+            "team2": "Dynamo Kyiv",
+            "home_odds": 1.8,
+            "away_odds": 4.5,
+        }]
+        validated = bot.validate_recommendations(candidates, matches)
+
+        self.assertEqual(len(validated), 1)
+        self.assertEqual(validated[0]["grade"], "Moderate Pick")
+        self.assertAlmostEqual(validated[0]["ev"], 0.0494)
+
+    def test_validation_uses_verified_team_odds_and_grade(self):
+        candidates = [{
+            "team": "Rangers",
+            "score": 8.3,
+            "assessed_probability": 0.83,
+        }]
+        matches = [{
+            "team1": "Dundee United",
+            "team2": "Rangers",
+            "home_odds": 5.25,
+            "away_odds": 1.541,
+            "tournament": "SPFL Premiership",
+        }]
+        validated = bot.validate_recommendations(candidates, matches)
+
+        self.assertEqual(len(validated), 1)
+        self.assertEqual(validated[0]["grade"], "Top Pick")
+        self.assertEqual(validated[0]["odds"], 1.541)
+        self.assertAlmostEqual(validated[0]["ev"], 0.27903)
+
+    def test_team_normalization_handles_missing_accents(self):
+        self.assertEqual(
+            bot.normalize_team_name("Atlético de San Luis"),
+            bot.normalize_team_name("Atletico de San Luis"),
+        )
+
+    def test_log_bets_deduplicates_team_and_date(self):
+        match = {
+            "team1": "Dundee United",
+            "team2": "Rangers",
+            "tournament": "SPFL Premiership",
+        }
+        recommendation = {
+            "team": "Rangers",
+            "grade": "Top Pick",
+            "odds": 1.541,
+            "match": match,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "bets-log.csv"
+            with patch.object(bot, "LOG_FILE", log_path):
+                first = bot.log_bets(
+                    "2026-07-31",
+                    [recommendation],
+                    [match],
+                    100.0,
+                )
+                second = bot.log_bets(
+                    "2026-07-31",
+                    [recommendation],
+                    [match],
+                    97.0,
+                )
+            rows = log_path.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(first, 3.0)
+        self.assertEqual(second, 0.0)
+        self.assertEqual(len(rows), 2)
+
+    def test_validation_footer_marks_no_bets_authoritatively(self):
+        result = bot.add_validation_summary("## TOP PICKS\nCandidate", 1, [])
+        self.assertIn("Python accepted 0 bet(s)", result)
+        self.assertIn("Final betting decision: NO BETS", result)
+
     def test_completion_limit_fits_groq_tpm_budget(self):
         self.assertLessEqual(bot.MAX_COMPLETION_TOKENS, 4096)
 

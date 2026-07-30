@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -573,6 +574,28 @@ Odds change, no guarantees, bet responsibly.
 
 ### Tone
 Direct and analytical. Quantify confidence. No marketing language. Aim for 500-800 words of dense analysis.
+
+### Machine-readable picks (REQUIRED)
+End the report with exactly one fenced JSON array under this heading:
+
+## MACHINE READABLE PICKS
+
+```json
+[
+  {
+    "team": "Exact team name from RAW DATA COLLECTED",
+    "opponent": "Exact opponent name from RAW DATA COLLECTED",
+    "score": 7.5,
+    "assessed_probability": 0.62
+  }
+]
+```
+
+Include only teams that you recommend after calculating EV. Use a probability
+between 0 and 1. Do not include odds, EV, grade, or stake in this JSON because
+Python will use the verified market odds and calculate those values itself.
+Use `[]` when no candidate is supported. The narrative sections must agree with
+this array. Never manufacture current form, H2H, injuries, lineups, or xG.
 """
     return prompt
 
@@ -613,6 +636,35 @@ def call_ai(prompt: str, api_key: str) -> str:
 
 def parse_recommendations(report: str) -> list[dict]:
     """Parse the AI report to extract recommended bets."""
+    json_blocks = re.findall(
+        r"```json\s*(.*?)```",
+        report,
+        re.IGNORECASE | re.DOTALL,
+    )
+    for block in reversed(json_blocks):
+        try:
+            items = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(items, list):
+            continue
+        structured = []
+        for item in items:
+            if not isinstance(item, dict) or not item.get("team"):
+                continue
+            try:
+                score = float(item["score"])
+                probability = float(item["assessed_probability"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            structured.append({
+                "team": str(item["team"]).strip(),
+                "opponent": str(item.get("opponent", "")).strip(),
+                "score": score,
+                "assessed_probability": probability,
+            })
+        return structured
+
     recommendations = []
     current_type = None
     last_team = None
@@ -687,6 +739,82 @@ def parse_recommendations(report: str) -> list[dict]:
     return recommendations
 
 
+def normalize_team_name(name: str) -> str:
+    """Normalize punctuation and spacing for model-to-market comparisons."""
+    ascii_name = unicodedata.normalize("NFKD", name.casefold()).encode(
+        "ascii",
+        "ignore",
+    ).decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "", ascii_name)
+
+
+def validate_recommendations(
+    recommendations: list[dict],
+    matches: list[dict],
+) -> list[dict]:
+    """Use verified odds and Python arithmetic to authorize recommendations."""
+    validated = []
+    for recommendation in recommendations:
+        team = recommendation.get("team", "")
+        team_key = normalize_team_name(team)
+        try:
+            score = float(recommendation["score"])
+            probability = float(recommendation["assessed_probability"])
+        except (KeyError, TypeError, ValueError):
+            log(f"  Rejected {team or 'unknown'}: missing score/probability")
+            continue
+        if probability > 1:
+            probability /= 100
+        if not 0 < probability < 1 or not 0 <= score <= 10:
+            log(f"  Rejected {team or 'unknown'}: invalid score/probability")
+            continue
+
+        match_info = None
+        verified_team = None
+        verified_odds = None
+        for match in matches:
+            if team_key == normalize_team_name(match["team1"]):
+                match_info = match
+                verified_team = match["team1"]
+                verified_odds = match.get("home_odds") or match.get("odds")
+                break
+            if team_key == normalize_team_name(match["team2"]):
+                match_info = match
+                verified_team = match["team2"]
+                verified_odds = match.get("away_odds") or match.get("odds")
+                break
+        if not match_info or verified_odds is None:
+            log(f"  Rejected {team or 'unknown'}: no verified team-specific odds")
+            continue
+
+        ev = probability * float(verified_odds) - 1
+        if score > 8 and ev > 0.08:
+            grade = "Top Pick"
+        elif score > 7 and ev > 0.05:
+            grade = "Value Pick"
+        elif score > 5.5 and ev > 0:
+            grade = "Moderate Pick"
+        else:
+            log(
+                f"  Rejected {team}: score {score:.2f}, "
+                f"recalculated EV {ev:.2%}"
+            )
+            continue
+
+        validated.append({
+            **recommendation,
+            "team": verified_team,
+            "odds": float(verified_odds),
+            "ev": ev,
+            "grade": grade,
+            "match": match_info,
+        })
+        log(
+            f"  Validated {team}: {grade}, score {score:.2f}, EV {ev:.2%}"
+        )
+    return validated
+
+
 def log_bets(
     date_str: str,
     recommendations: list[dict],
@@ -698,23 +826,29 @@ def log_bets(
     rows_to_append = []
     current_balance = bankroll
     total_stake = 0.0
+    existing_bets = set()
+    if file_exists and LOG_FILE.stat().st_size > 0:
+        with open(LOG_FILE, newline="", encoding="utf-8") as existing_file:
+            for row in csv.DictReader(existing_file):
+                existing_bets.add((
+                    row.get("DATE", "").strip(),
+                    normalize_team_name(
+                        re.sub(r"\s+to win\s*$", "", row.get("BET", ""), flags=re.I)
+                    ),
+                ))
 
     for rec in recommendations:
         if rec["grade"] not in ("Top Pick", "Value Pick"):
             continue
+        bet_key = (date_str, normalize_team_name(rec["team"]))
+        if bet_key in existing_bets:
+            log(f"  Skipped duplicate logged bet: {rec['team']} on {date_str}")
+            continue
 
-        match_info = None
-        for m in matches:
-            if rec["team"].lower() in m["team1"].lower() or rec["team"].lower() in m["team2"].lower():
-                match_info = m
-                break
-
+        match_info = rec.get("match")
         if not match_info:
-            match_info = {
-                "team1": rec.get("team", "Unknown"),
-                "team2": rec.get("opponent", "Unknown"),
-                "tournament": rec.get("tournament", "Unknown Competition"),
-            }
+            log(f"  Skipped {rec['team']}: missing validated match")
+            continue
 
         if current_balance is not None:
             if rec["grade"] == "Top Pick":
@@ -743,6 +877,7 @@ def log_bets(
             "return": "",
             "starting_balance": balance_str,
         })
+        existing_bets.add(bet_key)
 
         if current_balance is not None:
             current_balance -= stake
@@ -778,6 +913,38 @@ def save_report(date_str: str, report: str):
 
 
 # ─── Main ────────────────────────────────────────────────────────────
+
+def add_validation_summary(
+    report: str,
+    candidate_count: int,
+    recommendations: list[dict],
+) -> str:
+    """Append Python's authoritative betting decision to the AI report."""
+    lines = [
+        "",
+        "## PYTHON VALIDATION RESULT",
+        "",
+        (
+            f"The analysis produced {candidate_count} candidate(s). "
+            f"Python accepted {len(recommendations)} bet(s) after matching "
+            "verified team-specific odds and recalculating expected value."
+        ),
+    ]
+    if recommendations:
+        for rec in recommendations:
+            lines.append(
+                f"- **{rec['team']}** — {rec['grade']}, odds "
+                f"{rec['odds']:.2f}, assessed probability "
+                f"{rec['assessed_probability']:.1%}, verified EV {rec['ev']:.2%}."
+            )
+    else:
+        lines.extend([
+            "",
+            "**Final betting decision: NO BETS.** Any narrative picks above were "
+            "rejected and must not be treated as recommendations.",
+        ])
+    return report.rstrip() + "\n" + "\n".join(lines) + "\n"
+
 
 def already_logged_today(date_str: str) -> bool:
     if not LOG_FILE.exists() or LOG_FILE.stat().st_size == 0:
@@ -829,15 +996,28 @@ def main():
 
     report = call_ai(prompt, api_key)
 
-    recommendations = parse_recommendations(report)
-    log(f"Parsed {len(recommendations)} recommendations from report")
-    total_stake = log_bets(date_str, recommendations, qualified, bankroll)
+    candidates = parse_recommendations(report)
+    log(f"Parsed {len(candidates)} recommendation candidates from report")
+    recommendations = validate_recommendations(candidates, qualified)
+    log(f"Validated {len(recommendations)} recommendations")
+    authorized_bets = [
+        recommendation
+        for recommendation in recommendations
+        if recommendation["grade"] in ("Top Pick", "Value Pick")
+    ]
+    log(f"Authorized {len(authorized_bets)} Top/Value bets for logging")
+    total_stake = log_bets(date_str, authorized_bets, qualified, bankroll)
 
     save_bankroll(bankroll, total_stake)
-    save_report(date_str, report)
+    final_report = add_validation_summary(
+        report,
+        len(candidates),
+        authorized_bets,
+    )
+    save_report(date_str, final_report)
 
     log("=== Done ===")
-    print("\n" + report)
+    print("\n" + final_report)
 
 
 if __name__ == "__main__":
