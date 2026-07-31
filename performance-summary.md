@@ -5,6 +5,10 @@
 - Profit/loss: €8.92
 - ROI: 38.60%
 - Brier score: N/A
+- Log loss: N/A
+- Shadow challenger Brier: N/A
+- Shadow challenger log loss: N/A
+- Model drift: insufficient_data (0 resolved predictions)
 - Average CLV: N/A
 
 ## Calibration
