@@ -23,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BANKROLL_FILE = REPO_ROOT / "bankroll.txt"
 LOG_FILE = REPO_ROOT / "bets-log.csv"
 AUDIT_FILE = REPO_ROOT / "predictions-log.csv"
+PERFORMANCE_FILE = REPO_ROOT / "performance-summary.md"
 REPORTS_DIR = REPO_ROOT / "reports"
 
 REQUEST_TIMEOUT = 30
@@ -63,6 +64,7 @@ def parse_args():
     parser.add_argument("--odds-max", type=float, default=3.0, help="Max decimal odds")
     parser.add_argument("--bankroll", type=float, default=None, help="Override bankroll")
     parser.add_argument("--force", action="store_true", help="Run even if bets already logged for this date")
+    parser.add_argument("--settle-only", action="store_true", help="Settle pending bets without generating picks")
     parser.add_argument("--leagues", default=None, help="Comma-separated league filter (e.g., EPL,LaLiga,SerieA)")
     return parser.parse_args()
 
@@ -1204,6 +1206,21 @@ def append_prediction_audit(
     authorized: list[dict],
 ):
     """Persist every modelled team, including rejected and watchlist outcomes."""
+    headers = [
+        "DATE", "EVENT_ID", "MATCH", "PICK", "OPENING_ODDS",
+        "MARKET_PROBABILITY", "MODEL_PROBABILITY", "EV", "SCORE",
+        "EVIDENCE", "DECISION", "REASON", "RESULT", "CLOSING_ODDS", "CLV",
+    ]
+    if AUDIT_FILE.exists() and AUDIT_FILE.stat().st_size:
+        with open(AUDIT_FILE, newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            old_rows, old_headers = list(reader), reader.fieldnames or []
+        if old_headers != headers:
+            for row in old_rows:
+                row.setdefault("REASON", "legacy")
+            with open(AUDIT_FILE, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
+                writer.writeheader(); writer.writerows(old_rows)
     validated = {normalize_team_name(item["team"]): item for item in recommendations}
     selected = {normalize_team_name(item["team"]) for item in authorized}
     existing = set()
@@ -1227,6 +1244,18 @@ def append_prediction_audit(
                 item["grade"] if normalize_team_name(team) in selected
                 else "Watchlist" if item else "Rejected"
             )
+            if normalize_team_name(team) in selected:
+                reason = "authorized"
+            elif item and item.get("grade") in {"Top Pick", "Value Pick"}:
+                reason = "portfolio_limit"
+            elif item:
+                reason = "below_staking_threshold"
+            elif not baseline_is_reliable(baseline):
+                reason = "insufficient_or_conflicting_evidence"
+            elif baseline["ev"] <= 0:
+                reason = "non_positive_ev"
+            else:
+                reason = "not_selected"
             rows.append([
                 date_str, match.get("event_id", ""),
                 f"{match['team1']} vs {match['team2']}", team,
@@ -1235,7 +1264,7 @@ def append_prediction_audit(
                 f"{baseline['assessed_probability']:.6f}",
                 f"{baseline['ev']:.6f}", f"{baseline['score']:.3f}",
                 "reliable" if baseline_is_reliable(baseline) else "insufficient",
-                decision, "", "", "",
+                decision, reason, "", "", "",
             ])
     if not rows:
         return
@@ -1243,11 +1272,7 @@ def append_prediction_audit(
     with open(AUDIT_FILE, "a", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         if write_header:
-            writer.writerow([
-                "DATE", "EVENT_ID", "MATCH", "PICK", "OPENING_ODDS",
-                "MARKET_PROBABILITY", "MODEL_PROBABILITY", "EV", "SCORE",
-                "EVIDENCE", "DECISION", "RESULT", "CLOSING_ODDS", "CLV",
-            ])
+            writer.writerow(headers)
         writer.writerows(rows)
     log(f"Audited {len(rows)} evaluated team(s) to {AUDIT_FILE.name}")
 
@@ -1320,6 +1345,52 @@ def update_audit_result(date_str: str, pick_key: str, result: str, closing_odds)
             writer = csv.DictWriter(handle, fieldnames=headers)
             writer.writeheader()
             writer.writerows(rows)
+
+
+def generate_performance_summary():
+    """Build an evidence report from settled bets and audited probabilities."""
+    bets = []
+    if LOG_FILE.exists() and LOG_FILE.stat().st_size:
+        with open(LOG_FILE, newline="", encoding="utf-8") as handle:
+            bets = list(csv.DictReader(handle))
+    settled = [row for row in bets if row.get("RESULT") in {"W", "L"}]
+    stakes = sum(float(row.get("STAKE") or 0) for row in settled)
+    profit = sum(float(row.get("RETURN") or 0) - float(row.get("STAKE") or 0) for row in settled)
+    wins = sum(row.get("RESULT") == "W" for row in settled)
+    audit = []
+    if AUDIT_FILE.exists() and AUDIT_FILE.stat().st_size:
+        with open(AUDIT_FILE, newline="", encoding="utf-8") as handle:
+            audit = list(csv.DictReader(handle))
+    resolved = [row for row in audit if row.get("RESULT") in {"W", "L"}]
+    brier = None
+    if resolved:
+        brier = sum(
+            (float(row["MODEL_PROBABILITY"]) - (1 if row["RESULT"] == "W" else 0)) ** 2
+            for row in resolved if row.get("MODEL_PROBABILITY")
+        ) / len(resolved)
+    clv_values = [float(row["CLV"]) for row in resolved if row.get("CLV")]
+    lines = [
+        "# Football Bot Performance",
+        "",
+        f"- Settled bets: {len(settled)}",
+        f"- Win rate: {wins / len(settled):.1%}" if settled else "- Win rate: N/A",
+        f"- Profit/loss: €{profit:.2f}",
+        f"- ROI: {profit / stakes:.2%}" if stakes else "- ROI: N/A",
+        f"- Brier score: {brier:.4f}" if brier is not None else "- Brier score: N/A",
+        f"- Average CLV: {sum(clv_values) / len(clv_values):.2%}" if clv_values else "- Average CLV: N/A",
+        "",
+        "## Calibration",
+        "",
+        "| Predicted probability | Predictions | Actual win rate |",
+        "|---|---:|---:|",
+    ]
+    for low, high in ((0.50, .55), (.55, .60), (.60, .65), (.65, .70), (.70, 1.01)):
+        bucket = [row for row in resolved if row.get("MODEL_PROBABILITY") and low <= float(row["MODEL_PROBABILITY"]) < high]
+        label = f"{low:.0%}–{high:.0%}" if high <= 1 else "70%+"
+        actual = sum(row["RESULT"] == "W" for row in bucket) / len(bucket) if bucket else None
+        lines.append(f"| {label} | {len(bucket)} | {actual:.1%} |" if actual is not None else f"| {label} | 0 | N/A |")
+    PERFORMANCE_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    log(f"Performance summary saved: {PERFORMANCE_FILE.name}")
 
 
 def log_bets(
@@ -1478,6 +1549,11 @@ def main():
         log(f"League filter: {leagues}")
 
     settle_pending_bets()
+    generate_performance_summary()
+
+    if args.settle_only:
+        log("Settlement-only run complete")
+        return
 
     if not args.force and already_logged_today(date_str):
         log(f"Bets already logged for {date_str}. Skipping.")
@@ -1558,6 +1634,7 @@ def main():
         authorized_bets,
     )
     save_report(date_str, final_report)
+    generate_performance_summary()
 
     log("=== Done ===")
     print("\n" + final_report)
