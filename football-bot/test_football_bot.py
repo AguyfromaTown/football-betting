@@ -278,6 +278,36 @@ class FootballBotTests(unittest.TestCase):
         self.assertIn("Python accepted 0 bet(s)", result)
         self.assertIn("Final betting decision: NO BETS", result)
 
+    def test_settlement_credits_full_winning_return(self):
+        completed = [{
+            "team1": "Home", "team2": "Away", "completed": True,
+            "home_winner": True, "away_winner": False,
+            "home_odds": 1.8, "away_odds": 4.0,
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log_path, bankroll_path = root / "bets-log.csv", root / "bankroll.txt"
+            log_path.write_text(
+                "DATE,MATCH,BET,ODDS,STAKE,RESULT,RETURN,STARTING BALANCE\n"
+                "2026-08-01,Home vs Away (League),Home to win,2.00,3.00,,,100.00\n",
+                encoding="utf-8",
+            )
+            bankroll_path.write_text("97.00", encoding="utf-8")
+            with (
+                patch.object(bot, "LOG_FILE", log_path),
+                patch.object(bot, "BANKROLL_FILE", bankroll_path),
+                patch.object(bot, "fetch_matches_from_espn_api", return_value=completed),
+                patch.object(bot, "update_audit_result"),
+            ):
+                settled = bot.settle_pending_bets()
+
+            with log_path.open(encoding="utf-8") as handle:
+                rows = list(__import__("csv").DictReader(handle))
+            self.assertEqual(settled, 1)
+            self.assertEqual(rows[0]["RESULT"], "W")
+            self.assertEqual(rows[0]["RETURN"], "6.00")
+            self.assertEqual(bankroll_path.read_text(), "103.00")
+
     def test_completion_limit_fits_groq_tpm_budget(self):
         self.assertLessEqual(bot.MAX_COMPLETION_TOKENS, 4096)
 

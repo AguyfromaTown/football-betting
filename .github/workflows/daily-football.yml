@@ -30,6 +30,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: daily-football-picks
+  cancel-in-progress: false
+
 jobs:
   run-picks:
     runs-on: ubuntu-latest
