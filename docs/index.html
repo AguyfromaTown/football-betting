@@ -338,9 +338,17 @@
         <span class="count" id="audit-row-count">0 predictions</span>
       </div>
       <div class="table-scroll"><table id="audit-table">
-        <thead><tr><th>Date</th><th>Team</th><th>Competition</th><th>Level</th><th>Side</th><th>Quality</th><th>Books</th><th>Price source</th><th>Odds</th><th>Goals probability</th><th>Home xG</th><th>Away xG</th><th>Draw probability</th><th>Scorelines</th><th>Probability</th><th>EV</th><th>Weights</th><th>Decision</th><th>Reason</th><th>Result</th><th>CLV</th></tr></thead>
+        <thead><tr><th>Date</th><th>Team</th><th>Competition</th><th>Level</th><th>Side</th><th>Quality</th><th>Books</th><th>Price source</th><th>Odds</th><th>Goals probability</th><th>Home xG</th><th>Away xG</th><th>Draw probability</th><th>Scorelines</th><th>Raw probability</th><th>Active probability</th><th>Challenger</th><th>Calibration sample</th><th>Uncertainty</th><th>Segment sample</th><th>EV</th><th>Weights</th><th>Decision</th><th>Reason</th><th>Result</th><th>CLV</th></tr></thead>
         <tbody id="audit-body"></tbody>
       </table></div>
+    </section>
+
+    <section class="card table-card" style="margin-top:12px">
+      <div class="table-toolbar">
+        <div><h2 class="panel-title">Active vs shadow model</h2><div class="panel-kicker">Brier score and log loss; lower is better and promotion requires a chronological holdout improvement</div></div>
+        <span class="count" id="model-row-count">No mature comparison</span>
+      </div>
+      <div class="table-scroll"><table><thead><tr><th>Model</th><th>Settled predictions</th><th>Brier</th><th>Log loss</th><th>Status</th></tr></thead><tbody id="model-body"></tbody></table></div>
     </section>
 
     <section class="card table-card" style="margin-top:12px">
@@ -500,7 +508,7 @@
       el("audit-body").innerHTML = recent.map(row => {
         const result = String(row.result || "").toLowerCase();
         const resultCell = ["w","win","won"].includes(result) ? `<span class="badge win">Won</span>` : ["l","loss","lost"].includes(result) ? `<span class="badge loss">Lost</span>` : `<span class="badge pending">Open</span>`;
-        return `<tr><td>${safe(row.date || "—")}</td><td>${safe(row.pick || "—")}</td><td>${safe(row.competition || "—")}</td><td>${safe(row.level || "—")}</td><td>${safe(row.side || "—")}</td><td>${safe(row.quality_grade || "—")}</td><td>${safe(row.bookmakers || "—")}</td><td>${safe(row.odds_source || "—")}</td><td>${safe(row.opening_odds || "—")}</td><td>${safe(percent(row.goal_probability))}</td><td>${safe(row.home_xg || "—")}</td><td>${safe(row.away_xg || "—")}</td><td>${safe(percent(row.draw_probability))}</td><td>${safe(row.top_scorelines || "—")}</td><td>${safe(percent(row.model_probability))}</td><td>${safe(percent(row.ev))}</td><td>${safe(row.component_weights || "—")}</td><td>${safe(row.decision || "—")}</td><td>${safe(row.reason || "—")}</td><td>${resultCell}</td><td>${safe(percent(row.clv))}</td></tr>`;
+        return `<tr><td>${safe(row.date || "—")}</td><td>${safe(row.pick || "—")}</td><td>${safe(row.competition || "—")}</td><td>${safe(row.level || "—")}</td><td>${safe(row.side || "—")}</td><td>${safe(row.quality_grade || "—")}</td><td>${safe(row.bookmakers || "—")}</td><td>${safe(row.odds_source || "—")}</td><td>${safe(row.opening_odds || "—")}</td><td>${safe(percent(row.goal_probability))}</td><td>${safe(row.home_xg || "—")}</td><td>${safe(row.away_xg || "—")}</td><td>${safe(percent(row.draw_probability))}</td><td>${safe(row.top_scorelines || "—")}</td><td>${safe(percent(row.raw_probability))}</td><td>${safe(percent(row.model_probability))}</td><td>${safe(percent(row.challenger_probability))}</td><td>${safe(row.calibration_sample || "0")}</td><td>${safe(percent(row.uncertainty_penalty))} ${safe(row.uncertainty_reason || "")}</td><td>${safe(row.segment_sample || "0")}${String(row.segment_suspended).toLowerCase() === "true" ? " · suspended" : ""}</td><td>${safe(percent(row.ev))}</td><td>${safe(row.component_weights || "—")}</td><td>${safe(row.decision || "—")}</td><td>${safe(row.reason || "—")}</td><td>${resultCell}</td><td>${safe(percent(row.clv))}</td></tr>`;
       }).join("");
       el("audit-row-count").textContent = `${rows.length} audited predictions`;
     }
@@ -530,12 +538,30 @@
       el("pending-row-count").textContent = `${rows.length} lifecycle candidates`;
     }
 
+    function renderModelComparison(rows) {
+      const settled = rows.filter(row => ["w","l","win","loss","won","lost"].includes(String(row.result || "").toLowerCase()));
+      const metrics = (data, field) => {
+        if (!data.length) return [null, null];
+        const values = data.map(row => [Math.max(.001, Math.min(.999, Number(row[field]))), ["w","win","won"].includes(String(row.result).toLowerCase()) ? 1 : 0]);
+        return [values.reduce((sum,[p,y]) => sum + Math.pow(p-y,2),0)/values.length, values.reduce((sum,[p,y]) => sum -(y*Math.log(p)+(1-y)*Math.log(1-p)),0)/values.length];
+      };
+      const active = settled.filter(row => String(row.model_probability || "").trim());
+      const challenger = settled.filter(row => String(row.challenger_probability || "").trim());
+      const [activeBrier, activeLog] = metrics(active, "model_probability");
+      const [challengerBrier, challengerLog] = metrics(challenger, "challenger_probability");
+      const promoted = rows.some(row => String(row.challenger_promoted).toLowerCase() === "true");
+      const shown = value => value === null ? "—" : value.toFixed(4);
+      el("model-body").innerHTML = `<tr><td>Active model</td><td>${active.length}</td><td>${shown(activeBrier)}</td><td>${shown(activeLog)}</td><td><span class="badge win">Live</span></td></tr><tr><td>Learned challenger</td><td>${challenger.length}</td><td>${shown(challengerBrier)}</td><td>${shown(challengerLog)}</td><td><span class="badge ${promoted ? "win" : "pending"}">${promoted ? "Promoted" : "Shadow"}</span></td></tr>`;
+      el("model-row-count").textContent = challenger.length ? `${challenger.length} comparable results` : "No mature comparison";
+    }
+
     function refreshAll() {
       const withLocal = applyLocal(allRows);
       renderStats(withLocal);
       renderTable(withLocal.reverse());
       renderAudit(auditRows);
       renderBacktest(auditRows);
+      renderModelComparison(auditRows);
       renderPending(pendingRows);
       drawChart(withLocal);
       updateStatus(withLocal);

@@ -20,6 +20,65 @@ SPEC.loader.exec_module(bot)
 
 
 class FootballBotTests(unittest.TestCase):
+    def test_calibration_waits_for_mature_probability_bucket(self):
+        rows = [{"MODEL_PROBABILITY": ".60", "RESULT": "W"} for _ in range(99)]
+        self.assertEqual(bot.calibrate_probability(.60, rows), (.60, 99))
+        rows.append({"MODEL_PROBABILITY": ".60", "RESULT": "W"})
+        probability, sample = bot.calibrate_probability(.60, rows)
+        self.assertEqual(sample, 100)
+        self.assertGreater(probability, .60)
+
+    def test_shadow_weights_require_two_hundred_results(self):
+        rows = [{"DATE": "2026-01-01", "RESULT": "W", "GOAL_PROBABILITY": ".60",
+                 "MARKET_PROBABILITY": ".55", "EVIDENCE_PROBABILITY": ".58",
+                 "MODEL_PROBABILITY": ".57"} for _ in range(199)]
+        self.assertIsNone(bot.learned_component_weights(rows))
+
+    def test_model_drift_requires_two_windows_and_detects_degradation(self):
+        self.assertEqual(bot.model_drift_status([])["status"], "insufficient_data")
+        rows = ([{"DATE": "2026-01-01", "RESULT": "W", "MODEL_PROBABILITY": ".90", "CLV": ".02"}] * 30
+                + [{"DATE": "2026-02-01", "RESULT": "L", "MODEL_PROBABILITY": ".90", "CLV": "-.05"}] * 30)
+        self.assertEqual(bot.model_drift_status(rows)["status"], "alert")
+
+    def test_segment_suspension_requires_negative_roi_and_clv(self):
+        rows = [{"COMPETITION": "EPL", "SIDE": "home", "OPENING_ODDS": "1.80",
+                 "RESULT": "L", "CLV": "-0.03"} for _ in range(30)]
+        match = {"team1": "Home", "team2": "Away", "tournament": "EPL"}
+        self.assertTrue(bot.segment_health(match, "Home", 1.8, rows)["suspended"])
+        rows[0]["CLV"] = "1.00"
+        self.assertFalse(bot.segment_health(match, "Home", 1.8, rows)["suspended"])
+
+    def test_uncertain_competitions_receive_probability_penalty(self):
+        self.assertEqual(bot.competition_uncertainty({"tournament": "Club Friendly", "level": "Other"})[0], .03)
+        self.assertEqual(bot.competition_uncertainty({"tournament": "Premier League", "level": "EPL"})[0], 0)
+
+    def test_audit_result_update_preserves_headers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audit = Path(directory) / "audit.csv"
+            audit.write_text("DATE,PICK,OPENING_ODDS,RESULT,CLOSING_ODDS,CLV\n2026-08-01,Home,2.00,,,\n", encoding="utf-8")
+            with patch.object(bot, "AUDIT_FILE", audit):
+                bot.update_audit_result("2026-08-01", bot.normalize_team_name("Home"), "W", 1.8)
+            with audit.open(encoding="utf-8") as handle:
+                row = next(__import__("csv").DictReader(handle))
+        self.assertEqual(row["RESULT"], "W")
+        self.assertEqual(row["CLOSING_ODDS"], "1.800")
+
+    def test_cancelled_fixture_is_void_and_refunded(self):
+        fixture = [{"team1": "Home", "team2": "Away", "completed": False,
+                    "status": "STATUS_CANCELED", "status_detail": "Canceled"}]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); log_path = root / "bets.csv"; bankroll = root / "bankroll.txt"
+            log_path.write_text("DATE,MATCH,BET,ODDS,STAKE,RESULT,RETURN,STARTING BALANCE\n2026-08-01,Home vs Away (League),Home to win,2.00,3.00,,,100.00\n", encoding="utf-8")
+            bankroll.write_text("97.00", encoding="utf-8")
+            with patch.object(bot, "LOG_FILE", log_path), patch.object(bot, "BANKROLL_FILE", bankroll), patch.object(bot, "fetch_matches_from_espn_api", return_value=fixture), patch.object(bot, "update_audit_result"):
+                settled = bot.settle_pending_bets()
+            with log_path.open(encoding="utf-8") as handle:
+                row = next(__import__("csv").DictReader(handle))
+            balance = bankroll.read_text()
+        self.assertEqual(settled, 1)
+        self.assertEqual(row["RESULT"], "V")
+        self.assertEqual(balance, "100.00")
+
     def test_dashboard_uses_automated_data_sources_and_wl_results(self):
         html = (MODULE_PATH.parent.parent / "docs" / "index.html").read_text(
             encoding="utf-8"
@@ -33,6 +92,8 @@ class FootballBotTests(unittest.TestCase):
         self.assertIn('id="backtest-body"', html)
         self.assertIn('pending-bets.csv', html)
         self.assertIn('id="pending-body"', html)
+        self.assertIn('id="model-body"', html)
+        self.assertIn('challenger_probability', html)
         self.assertNotIn('Click any <b', html)
         self.assertNotIn('copy-csv-btn', html)
 
@@ -337,6 +398,7 @@ class FootballBotTests(unittest.TestCase):
             "team": "Rangers",
             "grade": "Top Pick",
             "odds": 1.541,
+            "assessed_probability": 0.75,
             "match": match,
         }
         with tempfile.TemporaryDirectory() as directory:

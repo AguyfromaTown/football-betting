@@ -36,6 +36,11 @@ MAX_AI_MATCHES = 20
 MAX_DAILY_EXPOSURE = 0.08
 MAX_DAILY_BETS = 4
 MAX_MARKET_OVERROUND = 1.18
+MIN_CALIBRATION_SAMPLE = 100
+MIN_SEGMENT_SAMPLE = 30
+MIN_WEIGHT_TRAINING_SAMPLE = 200
+KELLY_FRACTION = 0.25
+MIN_STAKE_RATE = 0.005
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -215,6 +220,8 @@ def fetch_matches_from_espn_api(date_str: str) -> list[dict]:
             "team2": away_name,
             "score": f"{home.get('score', '')}-{away.get('score', '')}",
             "completed": bool((event.get("status", {}).get("type") or {}).get("completed")),
+            "status": (event.get("status", {}).get("type") or {}).get("name") or "",
+            "status_detail": (event.get("status", {}).get("type") or {}).get("detail") or "",
             "home_winner": bool(home.get("winner")),
             "away_winner": bool(away.get("winner")),
             "tournament": league_name,
@@ -698,6 +705,131 @@ def enrich_matches_with_goal_model(matches: list[dict], date_str: str):
         match["goal_model"] = calculate_goal_model(match, history.get(code, []), date_str) if code else None
 
 
+def load_resolved_predictions(before_date: str | None = None) -> list[dict]:
+    """Load only outcomes that were available before the fixture being assessed."""
+    if not AUDIT_FILE.exists() or not AUDIT_FILE.stat().st_size:
+        return []
+    with AUDIT_FILE.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    return [row for row in rows if row.get("RESULT") in {"W", "L"} and row.get("MODEL_PROBABILITY")
+            and (not before_date or (row.get("DATE") or "") < before_date)]
+
+
+def probability_score(rows: list[dict], field: str, metric: str = "brier") -> float | None:
+    scores = []
+    for row in rows:
+        try:
+            probability = max(.001, min(.999, float(row.get(field) or "")))
+        except ValueError:
+            continue
+        outcome = 1 if row.get("RESULT") == "W" else 0
+        scores.append((probability - outcome) ** 2 if metric == "brier" else -(outcome * math.log(probability) + (1 - outcome) * math.log(1 - probability)))
+    return sum(scores) / len(scores) if scores else None
+
+
+def learned_component_weights(rows: list[dict]) -> dict | None:
+    """Train on the past and promote only after improvement on a later holdout."""
+    rows = sorted(rows, key=lambda row: row.get("DATE", ""))
+    if len(rows) < MIN_WEIGHT_TRAINING_SAMPLE:
+        return None
+    split = max(100, int(len(rows) * .7)); training, holdout = rows[:split], rows[split:]
+    fields = {"goals": "GOAL_PROBABILITY", "market": "MARKET_PROBABILITY", "form": "EVIDENCE_PROBABILITY"}
+    inverse = {}
+    for name, field in fields.items():
+        score = probability_score(training, field)
+        if score is not None:
+            inverse[name] = 1 / max(score, .01)
+    if "market" not in inverse or len(inverse) < 2:
+        return None
+    total = sum(inverse.values()); weights = {name: value / total for name, value in inverse.items()}
+    errors = []
+    for row in holdout:
+        available = {name: float(row[field]) for name, field in fields.items() if row.get(field)}
+        used = {name: weights[name] for name in available if name in weights}
+        if len(used) < 2:
+            continue
+        probability = sum(available[name] * weight for name, weight in used.items()) / sum(used.values())
+        errors.append((probability - (row.get("RESULT") == "W")) ** 2)
+    active = probability_score(holdout, "MODEL_PROBABILITY")
+    challenger = sum(errors) / len(errors) if errors else None
+    return {"weights": weights, "sample": len(rows), "holdout": len(holdout),
+            "active_brier": active, "challenger_brier": challenger,
+            "promoted": bool(active and challenger and challenger <= active * .97)}
+
+
+def calibrate_probability(probability: float, rows: list[dict]) -> tuple[float, int]:
+    bucket = []
+    for row in rows:
+        try:
+            historical = float(row.get("MODEL_PROBABILITY") or "")
+        except ValueError:
+            continue
+        if abs(historical - probability) <= .05:
+            bucket.append(row)
+    if len(bucket) < MIN_CALIBRATION_SAMPLE:
+        return probability, len(bucket)
+    actual = sum(row.get("RESULT") == "W" for row in bucket) / len(bucket)
+    strength = min(.5, len(bucket) / 500)
+    return max(.02, min(.98, probability * (1 - strength) + actual * strength)), len(bucket)
+
+
+def odds_band(odds: float) -> str:
+    if odds < 1.5: return "under_1.5"
+    if odds < 2.0: return "1.5_2.0"
+    if odds < 2.5: return "2.0_2.5"
+    if odds < 3.0: return "2.5_3.0"
+    return "3.0_plus"
+
+
+def segment_health(match: dict, team: str, odds: float, rows: list[dict]) -> dict:
+    side = "home" if normalize_team_name(team) == normalize_team_name(match["team1"]) else "away"
+    competition, band = match.get("tournament") or "Unknown", odds_band(odds)
+    segment = []
+    for row in rows:
+        try:
+            row_band = odds_band(float(row.get("OPENING_ODDS") or 0))
+        except ValueError:
+            continue
+        if (row.get("COMPETITION") or "Unknown") == competition and (row.get("SIDE") or "") == side and row_band == band:
+            segment.append(row)
+    roi = sum((float(row.get("OPENING_ODDS") or 0) - 1) if row["RESULT"] == "W" else -1 for row in segment) / len(segment) if segment else None
+    clv = [float(row["CLV"]) for row in segment if row.get("CLV")]
+    average_clv = sum(clv) / len(clv) if clv else None
+    suspended = len(segment) >= MIN_SEGMENT_SAMPLE and roi is not None and roi < -.05 and average_clv is not None and average_clv < -.02
+    return {"sample": len(segment), "roi": roi, "clv": average_clv, "suspended": suspended,
+            "key": f"{competition}|{side}|{band}"}
+
+
+def competition_uncertainty(match: dict) -> tuple[float, str]:
+    """Penalize formats where lineups and motivation are structurally less predictable."""
+    text = f"{match.get('tournament', '')} {match.get('level', '')}".casefold()
+    if any(token in text for token in ("friendly", "u17", "u18", "u19", "u20", "u21", "u23", "youth", "reserve")):
+        return .03, "friendly_or_youth"
+    if any(token in text for token in ("qualifying", "qualification", "playoff", "play-off")):
+        return .015, "qualifier_or_playoff"
+    return 0.0, "standard"
+
+
+def model_drift_status(rows: list[dict], window: int = 30) -> dict:
+    """Compare the latest resolved window with the preceding window."""
+    ordered = sorted(rows, key=lambda row: row.get("DATE", ""))
+    if len(ordered) < window * 2:
+        return {"status": "insufficient_data", "sample": len(ordered)}
+    previous, recent = ordered[-2 * window:-window], ordered[-window:]
+    previous_brier = probability_score(previous, "MODEL_PROBABILITY")
+    recent_brier = probability_score(recent, "MODEL_PROBABILITY")
+    previous_clv_values = [float(row["CLV"]) for row in previous if row.get("CLV")]
+    recent_clv_values = [float(row["CLV"]) for row in recent if row.get("CLV")]
+    previous_clv = sum(previous_clv_values) / len(previous_clv_values) if previous_clv_values else None
+    recent_clv = sum(recent_clv_values) / len(recent_clv_values) if recent_clv_values else None
+    alert = bool(previous_brier and recent_brier and recent_brier > previous_brier * 1.15)
+    if previous_clv is not None and recent_clv is not None and recent_clv < previous_clv - .03:
+        alert = True
+    return {"status": "alert" if alert else "stable", "sample": len(ordered),
+            "previous_brier": previous_brier, "recent_brier": recent_brier,
+            "previous_clv": previous_clv, "recent_clv": recent_clv}
+
+
 def calculate_team_baseline(match: dict, team: str) -> dict | None:
     """Estimate win probability from the de-vigged 3-way market and ESPN evidence."""
     home_odds = match.get("home_odds")
@@ -759,6 +891,25 @@ def calculate_team_baseline(match: dict, team: str) -> dict | None:
         goal_probability = None
         assessed_probability = fallback_probability
         component_weights = "goals=0;market+form=fallback"
+    raw_probability = assessed_probability
+    decision_date = str(match.get("start_time") or "")[:10] or None
+    history = load_resolved_predictions(decision_date)
+    side = "home" if team_key == normalize_team_name(match["team1"]) else "away"
+    comparable = [row for row in history if (row.get("LEVEL") or "Other") == (match.get("level") or "Other")
+                  and (row.get("SIDE") or "") == side and odds_band(float(row.get("OPENING_ODDS") or 0)) == odds_band(team_odds)]
+    challenger = learned_component_weights(comparable)
+    challenger_probability = None
+    if challenger and goal_probability is not None:
+        components = {"goals": goal_probability, "market": market_probability, "form": evidence_probability}
+        used = {name: challenger["weights"][name] for name in components if name in challenger["weights"]}
+        challenger_probability = sum(components[name] * weight for name, weight in used.items()) / sum(used.values())
+        if challenger["promoted"]:
+            assessed_probability = challenger_probability
+            component_weights = "learned:" + ";".join(f"{name}={weight:.3f}" for name, weight in sorted(used.items()))
+    assessed_probability, calibration_sample = calibrate_probability(assessed_probability, comparable)
+    uncertainty_penalty, uncertainty_reason = competition_uncertainty(match)
+    assessed_probability = max(.02, assessed_probability - uncertainty_penalty)
+    health = segment_health(match, team, team_odds, history)
     ev = assessed_probability * team_odds - 1
     score = max(0.0, min(10.0, 6.0 + max(0.0, ev) * 30))
 
@@ -774,6 +925,18 @@ def calculate_team_baseline(match: dict, team: str) -> dict | None:
         "goal_away_sample": goal_model.get("away_sample", 0) if goal_model else 0,
         "top_scorelines": goal_model.get("top_scorelines", []) if goal_model else [],
         "component_weights": component_weights,
+        "raw_probability": raw_probability,
+        "challenger_probability": challenger_probability,
+        "challenger_sample": challenger["sample"] if challenger else 0,
+        "challenger_promoted": challenger["promoted"] if challenger else False,
+        "calibration_sample": calibration_sample,
+        "uncertainty_penalty": uncertainty_penalty,
+        "uncertainty_reason": uncertainty_reason,
+        "segment_sample": health["sample"],
+        "segment_roi": health["roi"],
+        "segment_clv": health["clv"],
+        "segment_suspended": health["suspended"],
+        "segment_key": health["key"],
         "assessed_probability": assessed_probability,
         "ev": ev,
         "score": score,
@@ -806,6 +969,7 @@ def baseline_is_reliable(baseline: dict | None) -> bool:
         and baseline.get("complete_evidence")
         and baseline.get("signals_agree")
         and 0.98 <= baseline.get("market_overround", 0) <= MAX_MARKET_OVERROUND
+        and not baseline.get("segment_suspended")
     )
 
 
@@ -1456,9 +1620,12 @@ def append_prediction_audit(
     """Persist every modelled team, including rejected and watchlist outcomes."""
     headers = [
         "DATE", "EVENT_ID", "MATCH", "PICK", "OPENING_ODDS",
-        "MARKET_PROBABILITY", "MODEL_PROBABILITY", "GOAL_PROBABILITY",
+        "MARKET_PROBABILITY", "MODEL_PROBABILITY", "GOAL_PROBABILITY", "EVIDENCE_PROBABILITY",
         "HOME_XG", "AWAY_XG", "DRAW_PROBABILITY", "GOAL_HOME_SAMPLE",
-        "GOAL_AWAY_SAMPLE", "TOP_SCORELINES", "COMPONENT_WEIGHTS", "EV", "SCORE",
+        "GOAL_AWAY_SAMPLE", "TOP_SCORELINES", "COMPONENT_WEIGHTS", "RAW_PROBABILITY",
+        "CHALLENGER_PROBABILITY", "CHALLENGER_SAMPLE", "CHALLENGER_PROMOTED",
+        "CALIBRATION_SAMPLE", "UNCERTAINTY_PENALTY", "UNCERTAINTY_REASON",
+        "SEGMENT_SAMPLE", "SEGMENT_ROI", "SEGMENT_CLV", "SEGMENT_SUSPENDED", "SEGMENT_KEY", "EV", "SCORE",
         "EVIDENCE", "QUALITY_SCORE", "QUALITY_GRADE", "COMPETITION",
         "LEVEL", "SIDE", "BOOKMAKERS", "ODDS_SOURCE", "DECISION", "REASON", "RESULT", "CLOSING_ODDS", "CLV",
     ]
@@ -1517,12 +1684,21 @@ def append_prediction_audit(
                 f"{baseline['market_probability']:.6f}",
                 f"{baseline['assessed_probability']:.6f}",
                 f"{baseline['goal_probability']:.6f}" if baseline.get("goal_probability") is not None else "",
+                f"{baseline['evidence_probability']:.6f}",
                 f"{baseline['home_xg']:.4f}" if baseline.get("home_xg") is not None else "",
                 f"{baseline['away_xg']:.4f}" if baseline.get("away_xg") is not None else "",
                 f"{baseline['draw_probability']:.6f}" if baseline.get("draw_probability") is not None else "",
                 baseline.get("goal_home_sample", 0), baseline.get("goal_away_sample", 0),
                 ";".join(f"{home}-{away}:{probability:.1%}" for (home, away), probability in baseline.get("top_scorelines", [])),
                 baseline.get("component_weights", ""),
+                f"{baseline['raw_probability']:.6f}",
+                f"{baseline['challenger_probability']:.6f}" if baseline.get("challenger_probability") is not None else "",
+                baseline.get("challenger_sample", 0), baseline.get("challenger_promoted", False),
+                baseline.get("calibration_sample", 0), f"{baseline.get('uncertainty_penalty', 0):.6f}",
+                baseline.get("uncertainty_reason", "standard"), baseline.get("segment_sample", 0),
+                f"{baseline['segment_roi']:.6f}" if baseline.get("segment_roi") is not None else "",
+                f"{baseline['segment_clv']:.6f}" if baseline.get("segment_clv") is not None else "",
+                baseline.get("segment_suspended", False), baseline.get("segment_key", ""),
                 f"{baseline['ev']:.6f}", f"{baseline['score']:.3f}",
                 "reliable" if baseline_is_reliable(baseline) else "insufficient",
                 quality_score, quality_grade, match.get("tournament") or "Unknown",
@@ -1559,7 +1735,16 @@ def settle_pending_bets() -> int:
         match = next((item for item in events_by_date.get(row.get("DATE", ""), [])
                       if normalize_team_name(item["team1"]) in match_label
                       and normalize_team_name(item["team2"]) in match_label), None)
-        if not match or not match.get("completed"):
+        if not match:
+            continue
+        status_text = f"{match.get('status', '')} {match.get('status_detail', '')}".casefold()
+        if any(token in status_text for token in ("cancel", "postpon", "abandon", "suspend", "void")):
+            stake = float(row.get("STAKE") or 0)
+            row["RESULT"], row["RETURN"] = "V", f"{stake:.2f}"
+            credited += stake; settled += 1
+            update_audit_result(row.get("DATE", ""), pick, "V", None)
+            continue
+        if not match.get("completed"):
             continue
         if pick == normalize_team_name(match["team1"]):
             won = match.get("home_winner")
@@ -1593,8 +1778,9 @@ def update_audit_result(date_str: str, pick_key: str, result: str, closing_odds)
     if not AUDIT_FILE.exists() or not AUDIT_FILE.stat().st_size:
         return
     with open(AUDIT_FILE, newline="", encoding="utf-8") as handle:
-        rows = list(csv.DictReader(handle))
-        headers = handle.fieldnames
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+        headers = reader.fieldnames
     changed = False
     for row in rows:
         if row["DATE"] == date_str and normalize_team_name(row["PICK"]) == pick_key:
@@ -1633,6 +1819,11 @@ def generate_performance_summary():
             (float(row["MODEL_PROBABILITY"]) - (1 if row["RESULT"] == "W" else 0)) ** 2
             for row in modelled
         ) / len(modelled)
+    log_loss = probability_score(modelled, "MODEL_PROBABILITY", "log")
+    challenger_rows = [row for row in modelled if row.get("CHALLENGER_PROBABILITY")]
+    challenger_brier = probability_score(challenger_rows, "CHALLENGER_PROBABILITY")
+    challenger_log_loss = probability_score(challenger_rows, "CHALLENGER_PROBABILITY", "log")
+    drift = model_drift_status(modelled)
     clv_values = [float(row["CLV"]) for row in resolved if row.get("CLV")]
     lines = [
         "# Football Bot Performance",
@@ -1642,6 +1833,10 @@ def generate_performance_summary():
         f"- Profit/loss: €{profit:.2f}",
         f"- ROI: {profit / stakes:.2%}" if stakes else "- ROI: N/A",
         f"- Brier score: {brier:.4f}" if brier is not None else "- Brier score: N/A",
+        f"- Log loss: {log_loss:.4f}" if log_loss is not None else "- Log loss: N/A",
+        f"- Shadow challenger Brier: {challenger_brier:.4f}" if challenger_brier is not None else "- Shadow challenger Brier: N/A",
+        f"- Shadow challenger log loss: {challenger_log_loss:.4f}" if challenger_log_loss is not None else "- Shadow challenger log loss: N/A",
+        f"- Model drift: {drift['status']} ({drift['sample']} resolved predictions)",
         f"- Average CLV: {sum(clv_values) / len(clv_values):.2%}" if clv_values else "- Average CLV: N/A",
         "",
         "## Calibration",
@@ -1798,7 +1993,9 @@ def revalidate_pending_bets(api_keys: list[str], now: datetime | None = None) ->
         for row in candidates:
             match = next((m for m in matches if {normalize_team_name(m["team1"]), normalize_team_name(m["team2"])} == {normalize_team_name(row["TEAM1"]), normalize_team_name(row["TEAM2"])}), None)
             reason = None; baseline = calculate_team_baseline(match, row["PICK"]) if match else None
-            if not match or not baseline: reason = "market_unavailable"
+            status_text = f"{(match or {}).get('status', '')} {(match or {}).get('status_detail', '')}".casefold()
+            if any(token in status_text for token in ("cancel", "postpon", "abandon", "suspend", "in progress", "halftime", "final")): reason = "fixture_not_pre_match"
+            elif not match or not baseline: reason = "market_unavailable"
             elif int(match.get("bookmaker_count") or 0) < 2: reason = "insufficient_bookmakers"
             elif not float(row["ODDS_MIN"]) <= baseline["team_odds"] <= float(row["ODDS_MAX"]): reason = "price_outside_range"
             elif not baseline_is_reliable(baseline): reason = "model_disagreement"
@@ -1865,10 +2062,13 @@ def log_bets(
             continue
 
         if current_balance is not None:
-            if rec["grade"] == "Top Pick":
-                stake_pct = 0.03
-            else:
-                stake_pct = 0.02
+            cap = 0.03 if rec["grade"] == "Top Pick" else 0.02
+            try:
+                odds = float(rec["odds"]); probability = float(rec["assessed_probability"])
+                full_kelly = max(0.0, (probability * odds - 1) / (odds - 1))
+                stake_pct = min(cap, max(MIN_STAKE_RATE, full_kelly * KELLY_FRACTION))
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                stake_pct = MIN_STAKE_RATE
 
             stake = round(current_balance * stake_pct, 2)
             total_stake += stake

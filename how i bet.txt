@@ -1,4 +1,4 @@
-BETTING STRATEGY — Tiered Proportional Betting (Simplified Fractional Kelly)
+BETTING STRATEGY — Guarded Quarter-Kelly with Pre-Kickoff Authorization
 
 The old 5-step recovery sequence was replaced because it risked 99%+ bankroll 
 destruction on a single 5-bet losing streak (Bet 5 alone was 75% of bankroll). 
@@ -7,27 +7,38 @@ per-bet risk to a maximum of 3%.
 
 HOW IT WORKS
 
-Each bet's stake is a fixed percentage of the current bankroll, determined by 
-the pick grade from the analysis:
+Each authorized bet uses one-quarter of the full Kelly fraction calculated from
+the final revalidated odds and calibrated model probability. Grade limits remain
+hard maximums, and the minimum authorized stake is 0.5% of bankroll:
 
-  Top Pick (score > 8.0, EV > 8%)    → 3% of bankroll
-  Value Pick (score > 7.0, EV > 5%)  → 2% of bankroll
+  Top Pick (score > 8.0, EV > 8%)    → quarter-Kelly, capped at 3%
+  Value Pick (score > 7.0, EV > 5%)  → quarter-Kelly, capped at 2%
   Moderate Pick (score > 5.5, EV > 0%) → watchlist only, no stake
   No Bet (everything else)           → 0% of bankroll
 
-Bankroll is recalculated after every bet (win or lose). The percentage always 
-applies to the current bankroll, so stakes grow when winning and shrink when 
-losing — built-in risk management.
+Daily discovery only stages a candidate. No stake is logged or deducted until
+the scheduled workflow rechecks it within 90 minutes of kickoff. Odds, EV,
+bookmaker coverage, fixture status and model agreement must still pass.
+Cancelled, postponed, abandoned, suspended and void fixtures are refunded.
+
+Learning is guarded: calibration needs at least 100 comparable settled
+predictions; learned goal/market/form weights need at least 200 observations and
+a 3% Brier-score improvement on a chronological holdout. Otherwise the
+challenger stays in shadow mode. A competition/side/odds segment is suspended
+only after at least 30 results show both ROI below -5% and average CLV below -2%.
+Friendlies and youth matches receive a 3-point probability penalty; qualifiers
+and playoffs receive a 1.5-point penalty for lineup and motivation uncertainty.
 
 EXAMPLES
 
 Bankroll €100.00:
-  Top Pick bet:    €3.00  (3%)
-  Value Pick bet:  €2.00  (2%)
-  Moderate bet:    €1.00  (1%)
+  Top Pick bet:    €0.50–€3.00 depending on quarter-Kelly
+  Value Pick bet:  €0.50–€2.00 depending on quarter-Kelly
+  Moderate bet:    €0.00 (watchlist only)
 
-After a Top Pick win at 1.55 odds → new bankroll = 100 + (3 × 0.55) = €101.65
-After a Top Pick loss → new bankroll = 100 - 3 = €97.00
+At the maximum Top Pick stake, a win at 1.55 returns €4.65 and the settled
+bankroll becomes €101.65; a loss leaves €97.00. Smaller Kelly stakes move the
+bankroll proportionally less.
 
 WHY THIS WORKS BETTER
 
