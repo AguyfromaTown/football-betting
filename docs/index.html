@@ -411,7 +411,7 @@
           ret: Number.parseFloat(row.return) || 0,
           balance: Number.parseFloat(row["starting balance"] || row.balance),
         };
-      }).filter(row => row.date || row.match || row.bet);
+      }).filter(row => (row.date || row.match || row.bet) && row.date !== "2026-08-01");
     }
 
     function applyLocal(rows) {
