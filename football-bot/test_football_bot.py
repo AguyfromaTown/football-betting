@@ -190,6 +190,48 @@ class FootballBotTests(unittest.TestCase):
         self.assertAlmostEqual(baseline["assessed_probability"], 0.58)
         self.assertAlmostEqual(baseline["ev"], 0.16)
 
+    def test_dixon_coles_probabilities_are_normalized(self):
+        result = bot.dixon_coles_probabilities(1.6, 1.1)
+
+        self.assertAlmostEqual(result["home_probability"] + result["draw_probability"] + result["away_probability"], 1.0)
+        self.assertEqual(len(result["top_scorelines"]), 3)
+        self.assertGreater(result["home_probability"], result["away_probability"])
+
+    def test_goal_model_builds_attack_defence_xg_without_future_matches(self):
+        rows = []
+        for index in range(100):
+            rows.append({
+                "Date": f"{(index % 28) + 1:02d}/0{(index % 6) + 1}/2026",
+                "HomeTeam": "Home" if index < 12 else f"League Home {index % 10}",
+                "AwayTeam": "Away" if 12 <= index < 24 else f"League Away {index % 10}",
+                "FTHG": "2" if index < 12 else "1",
+                "FTAG": "2" if 12 <= index < 24 else "1",
+            })
+
+        model = bot.calculate_goal_model(
+            {"team1": "Home", "team2": "Away"}, rows, "2026-07-31"
+        )
+
+        self.assertIsNotNone(model)
+        self.assertGreaterEqual(model["home_sample"], 6)
+        self.assertGreaterEqual(model["away_sample"], 6)
+        self.assertGreater(model["home_xg"], 0)
+        self.assertAlmostEqual(model["home_probability"] + model["draw_probability"] + model["away_probability"], 1.0)
+
+    def test_baseline_blends_goal_model_at_forty_percent(self):
+        match = {
+            "team1": "Home", "team2": "Away", "home_odds": 2.0,
+            "draw_odds": 4.0, "away_odds": 4.0, "home_form": "WWWWW",
+            "away_form": "LLLLL", "home_record": "8-1-1", "away_record": "1-1-8",
+            "goal_model": {"home_probability": 0.60, "away_probability": 0.20, "draw_probability": 0.20, "home_xg": 1.8, "away_xg": 0.8, "home_sample": 12, "away_sample": 12, "top_scorelines": [((1, 0), 0.2)]},
+        }
+
+        baseline = bot.calculate_team_baseline(match, "Home")
+        expected = 0.40 * 0.60 + 0.35 * 0.50 + 0.25 * 0.66
+
+        self.assertAlmostEqual(baseline["assessed_probability"], expected)
+        self.assertEqual(baseline["component_weights"], "goals=.40;market=.35;form=.25")
+
     def test_evidence_quality_rewards_complete_consistent_match_data(self):
         match = {
             "event_id": "123", "level": "Premier League",

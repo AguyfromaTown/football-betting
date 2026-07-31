@@ -6,7 +6,9 @@ Designed for GitHub Actions execution.
 
 import argparse
 import csv
+import io
 import json
+import math
 import os
 import re
 import sys
@@ -574,6 +576,125 @@ def form_points_rate(form: str | None) -> float | None:
     return points / (3 * len(results))
 
 
+FOOTBALL_DATA_LEAGUES = {
+    "premier league": "E0", "epl": "E0", "la liga": "SP1", "bundesliga": "D1",
+    "serie a": "I1", "ligue 1": "F1", "eredivisie": "N1", "primeira liga": "P1",
+    "scottish premiership": "SC0", "spfl premiership": "SC0",
+}
+
+
+def football_data_code(match: dict) -> str | None:
+    text = f"{match.get('tournament', '')} {match.get('level', '')}".casefold()
+    return next((code for name, code in FOOTBALL_DATA_LEAGUES.items() if name in text), None)
+
+
+def parse_football_date(value: str) -> datetime | None:
+    for pattern in ("%d/%m/%Y", "%d/%m/%y"):
+        try:
+            return datetime.strptime(value.strip(), pattern)
+        except (ValueError, AttributeError):
+            pass
+    return None
+
+
+def fetch_football_history(matches: list[dict], date_str: str) -> dict[str, list[dict]]:
+    """Fetch two seasons for supported leagues from Football-Data.co.uk."""
+    codes = sorted({code for match in matches if (code := football_data_code(match))})
+    if not codes:
+        log("  No supported historical league matched; goals model unavailable")
+        return {}
+    date = datetime.strptime(date_str, "%Y-%m-%d")
+    start_year = date.year if date.month >= 7 else date.year - 1
+    seasons = (start_year - 1, start_year)
+    requests_to_make = [
+        (code, f"https://www.football-data.co.uk/mmz4281/{year % 100:02d}{(year + 1) % 100:02d}/{code}.csv")
+        for code in codes for year in seasons
+    ]
+    history = {code: [] for code in codes}
+    with ThreadPoolExecutor(max_workers=min(8, len(requests_to_make))) as executor:
+        futures = {executor.submit(fetch, url): code for code, url in requests_to_make}
+        for future in as_completed(futures):
+            text = future.result(); code = futures[future]
+            if text:
+                history[code].extend(csv.DictReader(io.StringIO(text)))
+    cutoff = datetime.strptime(date_str, "%Y-%m-%d")
+    for code in history:
+        history[code] = [row for row in history[code] if (played := parse_football_date(row.get("Date", ""))) and played < cutoff and row.get("FTHG") not in (None, "") and row.get("FTAG") not in (None, "")]
+        history[code].sort(key=lambda row: parse_football_date(row.get("Date", "")))
+    log(f"  Loaded {sum(map(len, history.values()))} historical league matches for goals modelling")
+    return history
+
+
+def poisson_probability(goals: int, expected: float) -> float:
+    return math.exp(-expected) * expected ** goals / math.factorial(goals)
+
+
+def dixon_coles_probabilities(home_xg: float, away_xg: float, rho: float = -0.08) -> dict:
+    """Create normalized scoreline and 1X2 probabilities with low-score correction."""
+    scorelines = {}
+    for home_goals in range(9):
+        for away_goals in range(9):
+            probability = poisson_probability(home_goals, home_xg) * poisson_probability(away_goals, away_xg)
+            if (home_goals, away_goals) == (0, 0): probability *= 1 - home_xg * away_xg * rho
+            elif (home_goals, away_goals) == (0, 1): probability *= 1 + home_xg * rho
+            elif (home_goals, away_goals) == (1, 0): probability *= 1 + away_xg * rho
+            elif (home_goals, away_goals) == (1, 1): probability *= 1 - rho
+            scorelines[(home_goals, away_goals)] = max(0, probability)
+    total = sum(scorelines.values()); scorelines = {score: probability / total for score, probability in scorelines.items()}
+    return {
+        "home_probability": sum(p for (h, a), p in scorelines.items() if h > a),
+        "draw_probability": sum(p for (h, a), p in scorelines.items() if h == a),
+        "away_probability": sum(p for (h, a), p in scorelines.items() if h < a),
+        "top_scorelines": sorted(scorelines.items(), key=lambda item: item[1], reverse=True)[:3],
+    }
+
+
+def calculate_goal_model(match: dict, rows: list[dict], date_str: str) -> dict | None:
+    """Estimate expected goals using shrunk, recency-weighted home/away strengths."""
+    if len(rows) < 80:
+        return None
+    cutoff = datetime.strptime(date_str, "%Y-%m-%d")
+    league = []
+    for row in rows:
+        played = parse_football_date(row.get("Date", ""))
+        try:
+            home_goals, away_goals = float(row["FTHG"]), float(row["FTAG"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        weight = 0.5 ** (max(0, (cutoff - played).days) / 240)
+        league.append((row, weight, home_goals, away_goals))
+    total_weight = sum(item[1] for item in league)
+    if not total_weight:
+        return None
+    league_home = sum(w * hg for _, w, hg, _ in league) / total_weight
+    league_away = sum(w * ag for _, w, _, ag in league) / total_weight
+    home_key, away_key = normalize_team_name(match["team1"]), normalize_team_name(match["team2"])
+    home_rows = [item for item in league if normalize_team_name(item[0].get("HomeTeam", "")) == home_key][-30:]
+    away_rows = [item for item in league if normalize_team_name(item[0].get("AwayTeam", "")) == away_key][-30:]
+    if len(home_rows) < 6 or len(away_rows) < 6:
+        return None
+    def weighted_rate(items, index):
+        return sum(item[1] * item[index] for item in items) / sum(item[1] for item in items)
+    home_attack_raw, home_concede_raw = weighted_rate(home_rows, 2), weighted_rate(home_rows, 3)
+    away_attack_raw, away_concede_raw = weighted_rate(away_rows, 3), weighted_rate(away_rows, 2)
+    def shrink(rating, sample):
+        factor = sample / (sample + 10)
+        return 1 + (rating - 1) * factor
+    home_attack = shrink(home_attack_raw / league_home, len(home_rows)); home_defence = shrink(home_concede_raw / league_away, len(home_rows))
+    away_attack = shrink(away_attack_raw / league_away, len(away_rows)); away_defence = shrink(away_concede_raw / league_home, len(away_rows))
+    home_xg = max(0.25, min(3.5, league_home * home_attack * away_defence))
+    away_xg = max(0.20, min(3.0, league_away * away_attack * home_defence))
+    probabilities = dixon_coles_probabilities(home_xg, away_xg)
+    return {"home_xg": home_xg, "away_xg": away_xg, "home_sample": len(home_rows), "away_sample": len(away_rows), **probabilities}
+
+
+def enrich_matches_with_goal_model(matches: list[dict], date_str: str):
+    history = fetch_football_history(matches, date_str)
+    for match in matches:
+        code = football_data_code(match)
+        match["goal_model"] = calculate_goal_model(match, history.get(code, []), date_str) if code else None
+
+
 def calculate_team_baseline(match: dict, team: str) -> dict | None:
     """Estimate win probability from the de-vigged 3-way market and ESPN evidence."""
     home_odds = match.get("home_odds")
@@ -621,16 +742,35 @@ def calculate_team_baseline(match: dict, team: str) -> dict | None:
         weight * difference for weight, difference in evidence
     ) / weight_total
     evidence_adjustment = max(-0.08, min(0.08, strength_difference * 0.10))
-    assessed_probability = max(
+    evidence_probability = max(0.20, min(0.80, 0.5 + 2 * evidence_adjustment))
+    fallback_probability = max(
         0.02,
         min(0.95, market_probability + evidence_adjustment),
     )
+    goal_model = match.get("goal_model")
+    if goal_model:
+        goal_probability = goal_model["home_probability"] if team_key == normalize_team_name(match["team1"]) else goal_model["away_probability"]
+        assessed_probability = 0.40 * goal_probability + 0.35 * market_probability + 0.25 * evidence_probability
+        component_weights = "goals=.40;market=.35;form=.25"
+    else:
+        goal_probability = None
+        assessed_probability = fallback_probability
+        component_weights = "goals=0;market+form=fallback"
     ev = assessed_probability * team_odds - 1
     score = max(0.0, min(10.0, 6.0 + max(0.0, ev) * 30))
 
     return {
         "market_probability": market_probability,
         "evidence_adjustment": evidence_adjustment,
+        "evidence_probability": evidence_probability,
+        "goal_probability": goal_probability,
+        "home_xg": goal_model.get("home_xg") if goal_model else None,
+        "away_xg": goal_model.get("away_xg") if goal_model else None,
+        "draw_probability": goal_model.get("draw_probability") if goal_model else None,
+        "goal_home_sample": goal_model.get("home_sample", 0) if goal_model else 0,
+        "goal_away_sample": goal_model.get("away_sample", 0) if goal_model else 0,
+        "top_scorelines": goal_model.get("top_scorelines", []) if goal_model else [],
+        "component_weights": component_weights,
         "assessed_probability": assessed_probability,
         "ev": ev,
         "score": score,
@@ -832,12 +972,19 @@ def build_prompt(
         def baseline_text(team: str, baseline: dict | None) -> str:
             if not baseline:
                 return f"  Python baseline for {team}: unavailable"
+            goals_text = (
+                f", goals win {baseline['goal_probability']:.1%}, xG "
+                f"{baseline['home_xg']:.2f}-{baseline['away_xg']:.2f}, draw "
+                f"{baseline['draw_probability']:.1%}"
+                if baseline.get("goal_probability") is not None else ", goals model unavailable"
+            )
             return (
                 f"  Python baseline for {team}: market fair "
                 f"{baseline['market_probability']:.1%}, evidence adjustment "
-                f"{baseline['evidence_adjustment']:+.1%}, assessed "
+                f"{baseline['evidence_adjustment']:+.1%}{goals_text}, assessed "
                 f"{baseline['assessed_probability']:.1%}, "
-                f"EV {baseline['ev']:.2%}, score {baseline['score']:.2f}"
+                f"EV {baseline['ev']:.2%}, score {baseline['score']:.2f}, "
+                f"weights {baseline['component_weights']}"
             )
 
         match_lines.append(
@@ -1292,6 +1439,7 @@ def evidence_quality(match: dict, baseline: dict) -> tuple[int, str]:
     points += 1 if match.get("home_record") and match.get("away_record") else 0
     bookmakers = int(match.get("bookmaker_count") or 0)
     points += 2 if bookmakers >= 3 else 1 if bookmakers >= 2 else 0
+    points += 1 if baseline.get("goal_home_sample", 0) >= 6 and baseline.get("goal_away_sample", 0) >= 6 else 0
     grade = "A" if points >= 9 else "B" if points >= 7 else "C" if points >= 5 else "D"
     return points, grade
 
@@ -1305,7 +1453,9 @@ def append_prediction_audit(
     """Persist every modelled team, including rejected and watchlist outcomes."""
     headers = [
         "DATE", "EVENT_ID", "MATCH", "PICK", "OPENING_ODDS",
-        "MARKET_PROBABILITY", "MODEL_PROBABILITY", "EV", "SCORE",
+        "MARKET_PROBABILITY", "MODEL_PROBABILITY", "GOAL_PROBABILITY",
+        "HOME_XG", "AWAY_XG", "DRAW_PROBABILITY", "GOAL_HOME_SAMPLE",
+        "GOAL_AWAY_SAMPLE", "TOP_SCORELINES", "COMPONENT_WEIGHTS", "EV", "SCORE",
         "EVIDENCE", "QUALITY_SCORE", "QUALITY_GRADE", "COMPETITION",
         "LEVEL", "SIDE", "BOOKMAKERS", "ODDS_SOURCE", "DECISION", "REASON", "RESULT", "CLOSING_ODDS", "CLV",
     ]
@@ -1363,6 +1513,13 @@ def append_prediction_audit(
                 f"{baseline['team_odds']:.3f}",
                 f"{baseline['market_probability']:.6f}",
                 f"{baseline['assessed_probability']:.6f}",
+                f"{baseline['goal_probability']:.6f}" if baseline.get("goal_probability") is not None else "",
+                f"{baseline['home_xg']:.4f}" if baseline.get("home_xg") is not None else "",
+                f"{baseline['away_xg']:.4f}" if baseline.get("away_xg") is not None else "",
+                f"{baseline['draw_probability']:.6f}" if baseline.get("draw_probability") is not None else "",
+                baseline.get("goal_home_sample", 0), baseline.get("goal_away_sample", 0),
+                ";".join(f"{home}-{away}:{probability:.1%}" for (home, away), probability in baseline.get("top_scorelines", [])),
+                baseline.get("component_weights", ""),
                 f"{baseline['ev']:.6f}", f"{baseline['score']:.3f}",
                 "reliable" if baseline_is_reliable(baseline) else "insufficient",
                 quality_score, quality_grade, match.get("tournament") or "Unknown",
@@ -1728,6 +1885,8 @@ def main():
     enrich_with_multi_bookmaker_odds(all_matches, date_str, odds_api_keys)
 
     qualified = attach_odds(all_matches, odds_min, odds_max)
+    log("Building historical attack/defence and scoreline model...")
+    enrich_matches_with_goal_model(qualified, date_str)
 
     statistical_candidates = build_statistical_candidates(
         qualified,
