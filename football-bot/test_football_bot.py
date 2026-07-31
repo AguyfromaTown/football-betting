@@ -194,6 +194,46 @@ class FootballBotTests(unittest.TestCase):
         self.assertEqual(candidates[0]["team"], "Home")
         self.assertAlmostEqual(candidates[0]["assessed_probability"], 0.58)
 
+    def test_candidate_scan_rejects_conflicting_form_and_season_signals(self):
+        match = {
+            "team1": "Home", "team2": "Away",
+            "home_odds": 2.0, "draw_odds": 4.0, "away_odds": 4.0,
+            "home_form": "WWWWW", "away_form": "LLLLL",
+            "home_record": "1-1-8", "away_record": "8-1-1",
+        }
+        self.assertEqual(bot.build_statistical_candidates([match], 1.5, 3.0), [])
+
+    def test_candidate_scan_requires_complete_evidence(self):
+        match = {
+            "team1": "Home", "team2": "Away",
+            "home_odds": 2.0, "draw_odds": 4.0, "away_odds": 4.0,
+            "home_form": "WWWWW", "away_form": "LLLLL",
+            "home_record": None, "away_record": None,
+        }
+        self.assertEqual(bot.build_statistical_candidates([match], 1.5, 3.0), [])
+
+    def test_portfolio_prioritizes_ev_and_caps_daily_exposure(self):
+        recommendations = [{
+            "team": f"Team {index}", "grade": "Top Pick", "ev": ev,
+            "score": 9.0,
+            "match": {"team1": f"Team {index}", "team2": f"Other {index}"},
+        } for index, ev in enumerate((0.20, 0.18, 0.16, 0.14, 0.12))]
+
+        selected = bot.select_portfolio(recommendations)
+
+        self.assertEqual([item["ev"] for item in selected], [0.20, 0.18])
+
+    def test_portfolio_never_selects_both_sides_of_same_match(self):
+        match = {"team1": "Home", "team2": "Away"}
+        recommendations = [
+            {"team": "Home", "grade": "Value Pick", "ev": 0.10, "score": 8, "match": match},
+            {"team": "Away", "grade": "Value Pick", "ev": 0.08, "score": 8, "match": match},
+        ]
+
+        selected = bot.select_portfolio(recommendations)
+
+        self.assertEqual([item["team"] for item in selected], ["Home"])
+
     def test_team_normalization_handles_missing_accents(self):
         self.assertEqual(
             bot.normalize_team_name("Atlético de San Luis"),

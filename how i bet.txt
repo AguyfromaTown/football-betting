@@ -12,7 +12,7 @@ the pick grade from the analysis:
 
   Top Pick (score > 8.0, EV > 8%)    → 3% of bankroll
   Value Pick (score > 7.0, EV > 5%)  → 2% of bankroll
-  Moderate Pick (score > 5.5, EV > 0%) → 1% of bankroll
+  Moderate Pick (score > 5.5, EV > 0%) → watchlist only, no stake
   No Bet (everything else)           → 0% of bankroll
 
 Bankroll is recalculated after every bet (win or lose). The percentage always 

@@ -27,6 +27,9 @@ REPORTS_DIR = REPO_ROOT / "reports"
 REQUEST_TIMEOUT = 30
 MAX_COMPLETION_TOKENS = 4096
 MAX_AI_MATCHES = 20
+MAX_DAILY_EXPOSURE = 0.08
+MAX_DAILY_BETS = 4
+MAX_MARKET_OVERROUND = 1.18
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -548,7 +551,31 @@ def calculate_team_baseline(match: dict, team: str) -> dict | None:
         "opponent_form_rate": opponent_form,
         "team_record_rate": team_record,
         "opponent_record_rate": opponent_record,
+        "market_overround": inverse_total,
+        "complete_evidence": all(value is not None for value in (
+            team_form,
+            opponent_form,
+            team_record,
+            opponent_record,
+        )),
+        "signals_agree": (
+            team_form is not None
+            and opponent_form is not None
+            and team_record is not None
+            and opponent_record is not None
+            and (team_form - opponent_form) * (team_record - opponent_record) >= 0
+        ),
     }
+
+
+def baseline_is_reliable(baseline: dict | None) -> bool:
+    """Require a complete, internally consistent evidence set and sane market."""
+    return bool(
+        baseline
+        and baseline.get("complete_evidence")
+        and baseline.get("signals_agree")
+        and 0.98 <= baseline.get("market_overround", 0) <= MAX_MARKET_OVERROUND
+    )
 
 
 def build_statistical_candidates(
@@ -565,7 +592,7 @@ def build_statistical_candidates(
         ):
             baseline = calculate_team_baseline(match, team)
             if (
-                baseline
+                baseline_is_reliable(baseline)
                 and odds_min <= baseline["team_odds"] <= odds_max
                 and baseline["ev"] > 0
             ):
@@ -625,7 +652,7 @@ def build_deterministic_report(
             stake_pct = 0.02
         elif score > 5.5 and ev > 0:
             grade = "Moderate Pick"
-            stake_pct = 0.01
+            stake_pct = 0.0
         else:
             continue
         classified.append((ev, candidate, match, baseline, grade, stake_pct))
@@ -653,7 +680,10 @@ def build_deterministic_report(
                 == normalize_team_name(match["team1"]) else match["team1"]
             )
             stake = bankroll * stake_pct if bankroll is not None else None
-            stake_text = f"; stake €{stake:.2f}" if stake is not None else ""
+            if grade == "Moderate Pick":
+                stake_text = "; watchlist only, no stake"
+            else:
+                stake_text = f"; stake €{stake:.2f}" if stake is not None else ""
             lines.append(
                 f"- **{candidate['team']} vs {opponent}** — {grade}; "
                 f"odds {baseline['team_odds']:.2f}; assessed probability "
@@ -806,7 +836,7 @@ Assign final calls:
 
 - **Top Pick** (score > 8.0, EV > 8%)
 - **Value Pick** (score > 7.0, EV > 5%)
-- **Moderate Pick** (score > 5.5, EV > 0%)
+- **Moderate Pick / Watchlist** (score > 5.5, EV > 0%; no authorized stake)
 - **No Bet** (everything else)
 """
 
@@ -819,7 +849,7 @@ Current bankroll: €{bankroll:.2f}
 For each recommendation, include:
 - Top Pick: €{bankroll * 0.03:.2f} (3% of bankroll)
 - Value Pick: €{bankroll * 0.02:.2f} (2% of bankroll)
-- Moderate Pick: €{bankroll * 0.01:.2f} (1% of bankroll)
+- Moderate Pick: watchlist only (no stake)
 """
 
     prompt += """
@@ -1074,6 +1104,12 @@ def validate_recommendations(
         if not baseline:
             log(f"  Rejected {team or 'unknown'}: statistical baseline unavailable")
             continue
+        if not baseline_is_reliable(baseline):
+            log(
+                f"  Rejected {team or 'unknown'}: incomplete, conflicting, "
+                "or low-quality market evidence"
+            )
+            continue
         if (
             abs(probability - baseline["assessed_probability"]) > 0.005
             or abs(score - baseline["score"]) > 0.05
@@ -1114,6 +1150,46 @@ def validate_recommendations(
             f"  Validated {team}: {grade}, score {score:.2f}, EV {ev:.2%}"
         )
     return validated
+
+
+def select_portfolio(
+    recommendations: list[dict],
+    max_exposure: float = MAX_DAILY_EXPOSURE,
+    max_bets: int = MAX_DAILY_BETS,
+) -> list[dict]:
+    """Select the strongest non-duplicated bets within a daily risk budget."""
+    stake_rates = {"Top Pick": 0.03, "Value Pick": 0.02}
+    ranked = sorted(
+        recommendations,
+        key=lambda rec: (rec.get("ev", 0), rec.get("score", 0)),
+        reverse=True,
+    )
+    selected = []
+    seen_matches = set()
+    exposure = 0.0
+    for recommendation in ranked:
+        stake_rate = stake_rates.get(recommendation.get("grade"))
+        match = recommendation.get("match") or {}
+        if stake_rate is None or not match:
+            continue
+        match_key = tuple(sorted((
+            normalize_team_name(match.get("team1", "")),
+            normalize_team_name(match.get("team2", "")),
+        )))
+        if match_key in seen_matches:
+            log(f"  Portfolio rejected {recommendation['team']}: match already selected")
+            continue
+        if len(selected) >= max_bets or exposure + stake_rate > max_exposure + 1e-9:
+            log(f"  Portfolio rejected {recommendation['team']}: daily risk cap reached")
+            continue
+        selected.append(recommendation)
+        seen_matches.add(match_key)
+        exposure += stake_rate
+    log(
+        f"Portfolio selected {len(selected)} bet(s) with planned exposure "
+        f"{exposure:.1%}"
+    )
+    return selected
 
 
 def log_bets(
@@ -1333,11 +1409,12 @@ def main():
         odds_max,
     )
     log(f"Validated {len(recommendations)} recommendations")
-    authorized_bets = [
+    validated_bets = [
         recommendation
         for recommendation in recommendations
         if recommendation["grade"] in ("Top Pick", "Value Pick")
     ]
+    authorized_bets = select_portfolio(validated_bets)
     log(f"Authorized {len(authorized_bets)} Top/Value bets for logging")
     total_stake = log_bets(date_str, authorized_bets, qualified, bankroll)
 
