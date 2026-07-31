@@ -171,20 +171,6 @@
       transition: filter .15s, border-color .15s; border: 1px solid transparent;
     }
     .badge.pending:hover { filter: brightness(1.25); border-color: rgba(255,196,107,.25); }
-    .result-picker {
-      display: inline-flex; gap: 4px; white-space: nowrap;
-    }
-    .result-picker button {
-      padding: 4px 12px; border: 1px solid var(--line); border-radius: 6px;
-      background: var(--surface-2); cursor: pointer; font-size: 11px; font-weight: 700;
-      transition: background .15s, border-color .15s;
-    }
-    .result-picker button:hover { border-color: var(--muted-2); }
-    .result-picker button.pick-win { color: var(--green); }
-    .result-picker button.pick-win:hover { background: var(--green-soft); border-color: rgba(75,218,122,.3); }
-    .result-picker button.pick-loss { color: var(--red); }
-    .result-picker button.pick-loss:hover { background: var(--red-soft); border-color: rgba(255,113,108,.3); }
-
     .toast {
       position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(100px);
       padding: 10px 20px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line);
@@ -249,19 +235,11 @@
       <div class="status" id="status"><span class="status-dot"></span><span id="status-text">Syncing data</span></div>
     </header>
 
-    <div class="banner" id="banner">
-      <span class="banner-text" id="banner-text">Results saved locally.</span>
-      <div class="banner-actions">
-        <button class="banner-btn" id="clear-local-btn">Clear</button>
-        <button class="banner-btn primary" id="copy-csv-btn">Copy updated CSV</button>
-      </div>
-    </div>
-
     <section class="hero">
       <div>
         <div class="eyebrow">Performance dashboard</div>
         <h1>Your football edge,<br>made visible.</h1>
-        <p>Click any <b style="color:var(--amber)">Open</b> badge to mark a result. Returns update instantly.</p>
+        <p>Results, returns, bankroll, calibration and closing-line value update automatically from the bot.</p>
       </div>
       <div class="updated">Latest activity<strong id="last-updated">Loading your log…</strong></div>
     </section>
@@ -292,7 +270,7 @@
     <section class="dashboard">
       <article class="card panel">
         <div class="panel-head">
-          <div><h2 class="panel-title">Bankroll trajectory</h2><div class="panel-kicker">Balance after each recorded bet</div></div>
+          <div><h2 class="panel-title">Bankroll trajectory</h2><div class="panel-kicker">Starting balance recorded for each bet</div></div>
           <span class="period" id="chart-period">All time</span>
         </div>
         <div class="chart-wrap">
@@ -313,12 +291,15 @@
           </div>
         </div>
         <div class="record-row"><span>Average odds</span><b id="avg-odds">—</b></div>
+        <div class="record-row"><span>Brier score</span><b id="brier-score">—</b></div>
+        <div class="record-row"><span>Average CLV</span><b id="average-clv">—</b></div>
+        <div class="record-row"><span>Audited predictions</span><b id="audit-count">0</b></div>
       </article>
     </section>
 
     <section class="card table-card">
       <div class="table-toolbar">
-        <div><h2 class="panel-title">Bet history</h2><div class="panel-kicker">Click <b style="color:var(--amber)">Open</b> to mark a result</div></div>
+        <div><h2 class="panel-title">Bet history</h2><div class="panel-kicker">Automatically settled by the football workflow</div></div>
         <div class="table-tools">
           <span class="count" id="row-count">0 entries</span>
           <label class="search">
@@ -340,41 +321,25 @@
       </div>
     </section>
 
-    <footer class="footer"><span>Footbook performance dashboard</span><span>Results marked here are saved in your browser &middot; <a href="#" id="clear-all-link" style="color:var(--muted-2)">Clear all local results</a></span></footer>
+    <footer class="footer"><span>Footbook performance dashboard</span><span>Synced from bets-log.csv, predictions-log.csv and bankroll.txt</span></footer>
 
     <div class="toast" id="toast"></div>
   </main>
 
   <script>
-    const DATA_URL = "https://api.github.com/repos/AguyfromaTown/football-betting/contents/bets-log.csv";
-    const STORAGE_KEY = "footbook_results";
+    const RAW_ROOT = "https://raw.githubusercontent.com/AguyfromaTown/football-betting/main/";
+    const DATA_URL = RAW_ROOT + "bets-log.csv";
+    const AUDIT_URL = RAW_ROOT + "predictions-log.csv";
+    const BANKROLL_URL = RAW_ROOT + "bankroll.txt";
+    const PERFORMANCE_URL = RAW_ROOT + "performance-summary.md";
     let allRows = [];
-    let localResults = {};
+    let auditRows = [];
+    let currentBankroll = null;
+    let performanceText = "";
 
     const el = id => document.getElementById(id);
     const money = value => new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR" }).format(value || 0);
     const safe = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;" })[char]);
-
-    function loadLocalResults() {
-      try { localResults = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; } catch {}
-    }
-    function saveLocalResults() {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(localResults));
-      updateBanner();
-    }
-    function rowKey(r) {
-      return `${r.date}|${r.match}|${r.odds}`;
-    }
-    function hasLocal() {
-      return Object.keys(localResults).length > 0;
-    }
-    function updateBanner() {
-      const count = Object.keys(localResults).length;
-      el("banner").classList.toggle("show", count > 0);
-      el("banner-text").textContent = count + " result" + (count > 1 ? "s" : "") + " saved in browser.";
-      if (count > 0) el("status-dot").classList.add("warning");
-      else el("status-dot").classList.remove("warning");
-    }
 
     function parseCSV(text) {
       const records = []; let row = []; let field = ""; let quoted = false;
@@ -400,7 +365,8 @@
       return parseCSV(text).map(row => {
         const odds = Number.parseFloat(row.odds) || 0;
         const stake = Number.parseFloat(row.stake) || 0;
-        const rawResult = (row.result || "").toLowerCase();
+        const value = (row.result || "").trim().toLowerCase();
+        const rawResult = ["w","win","won"].includes(value) ? "win" : ["l","loss","lost"].includes(value) ? "loss" : "";
         return {
           date: row.date || "",
           match: row.match || "",
@@ -415,16 +381,7 @@
     }
 
     function applyLocal(rows) {
-      return rows.map(r => {
-        const key = rowKey(r);
-        const lr = localResults[key];
-        if (lr) {
-          const won = lr === "win";
-          const stake = r.stake || 0;
-          return { ...r, result: won ? "win" : "loss", ret: won ? Math.round(stake * r.odds * 100) / 100 : 0 };
-        }
-        return { ...r };
-      });
+      return rows.map(r => ({ ...r }));
     }
 
     function renderStats(rows) {
@@ -433,12 +390,13 @@
       const losses = settled.filter(r => ["loss","lost"].includes(r.result));
       const pending = rows.length - settled.length;
       const totalStake = rows.reduce((sum,r) => sum + r.stake, 0);
-      const totalReturn = rows.reduce((sum,r) => sum + r.ret, 0);
-      const pnl = totalReturn - totalStake;
-      const roi = totalStake ? pnl / totalStake * 100 : 0;
+      const settledStake = settled.reduce((sum,r) => sum + r.stake, 0);
+      const totalReturn = settled.reduce((sum,r) => sum + r.ret, 0);
+      const pnl = totalReturn - settledStake;
+      const roi = settledStake ? pnl / settledStake * 100 : 0;
       const winRate = settled.length ? wins.length / settled.length * 100 : 0;
       const balances = rows.filter(r => Number.isFinite(r.balance));
-      const latestBalance = balances.length ? balances.at(-1).balance : null;
+      const latestBalance = Number.isFinite(currentBankroll) ? currentBankroll : balances.length ? balances.at(-1).balance : null;
       const odds = rows.filter(r => r.odds > 0);
 
       setMetric("total-bets", rows.length.toLocaleString());
@@ -455,6 +413,11 @@
       el("ring-rate").textContent = settled.length ? Math.round(winRate) + "%" : "—";
       el("result-ring").style.setProperty("--p", winRate);
       el("avg-odds").textContent = odds.length ? (odds.reduce((s,r) => s + r.odds,0) / odds.length).toFixed(2) : "—";
+      const brier = performanceText.match(/Brier score:\s*([0-9.]+)/i);
+      const clv = performanceText.match(/Average CLV:\s*([+-]?[0-9.]+)%/i);
+      el("brier-score").textContent = brier ? brier[1] : "—";
+      el("average-clv").textContent = clv ? clv[1] + "%" : "—";
+      el("audit-count").textContent = auditRows.length.toLocaleString();
     }
 
     function setMetric(id, value, tone) {
@@ -477,8 +440,7 @@
         } else if (lost) {
           resultCell = `<span class="badge loss">Lost</span>`;
         } else {
-          const key = safe(rowKey(r));
-          resultCell = `<span class="badge pending" data-key="${key}">Open</span>`;
+          resultCell = `<span class="badge pending">Open</span>`;
         }
 
         return `<tr>
@@ -495,32 +457,6 @@
       el("empty-state").style.display = rows.length ? "none" : "block";
       el("row-count").textContent = `${rows.length} ${rows.length === 1 ? "entry" : "entries"}`;
 
-      document.querySelectorAll(".badge.pending[data-key]").forEach(el => {
-        el.addEventListener("click", function(e) {
-          e.stopPropagation();
-          const key = this.dataset.key;
-          showResultPicker(this, key);
-        });
-      });
-    }
-
-    function showResultPicker(targetEl, key) {
-      const existing = targetEl.parentElement.querySelector(".result-picker");
-      if (existing) { existing.remove(); return; }
-      const picker = document.createElement("span");
-      picker.className = "result-picker";
-      picker.innerHTML = `<button class="pick-win" data-action="win">Won</button><button class="pick-loss" data-action="loss">Lost</button>`;
-      targetEl.replaceWith(picker);
-      picker.querySelectorAll("button").forEach(btn => {
-        btn.addEventListener("click", function(e) {
-          e.stopPropagation();
-          const result = this.dataset.action;
-          localResults[key] = result;
-          saveLocalResults();
-          refreshAll();
-          showToast(result === "win" ? "Marked as Won" : "Marked as Lost", "success");
-        });
-      });
     }
 
     function refreshAll() {
@@ -583,27 +519,17 @@
       });
     }
 
-    function generateUpdatedCSV() {
-      const withLocal = applyLocal(allRows);
-      const header = "DATE,MATCH,BET,ODDS,STAKE,RESULT,RETURN,STARTING BALANCE";
-      const rows = withLocal.map(r => {
-        const result = ["win","won"].includes(r.result) ? "win" : ["loss","lost"].includes(r.result) ? "loss" : "";
-        const ret = result === "win" ? (r.odds * r.stake).toFixed(2) : result === "loss" ? "0.00" : "";
-        return `${r.date},${r.match},${r.bet},${r.odds},${r.stake.toFixed(2)},${result},${ret},${r.balance !== null ? r.balance.toFixed(2) : ""}`;
-      }).join("\n");
-      return header + "\n" + rows;
-    }
-
     async function loadLog() {
-      loadLocalResults();
       try {
-        const response = await fetch(DATA_URL);
-        if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
-        const json = await response.json();
-        const text = atob(json.content.replace(/\s/g, ""));
-        allRows = normalizeRows(text);
+        const required = await Promise.all([fetch(DATA_URL), fetch(BANKROLL_URL)]);
+        if (!required[0].ok) throw new Error(`bets-log.csv returned ${required[0].status}`);
+        allRows = normalizeRows(await required[0].text());
+        currentBankroll = required[1].ok ? Number.parseFloat(await required[1].text()) : null;
+        const optional = await Promise.all([fetch(AUDIT_URL), fetch(PERFORMANCE_URL)]);
+        auditRows = optional[0].ok ? parseCSV(await optional[0].text()) : [];
+        performanceText = optional[1].ok ? await optional[1].text() : "";
         refreshAll();
-        el("status-text").textContent = hasLocal() ? "Data synced · results pending" : "Data synced";
+        el("status-text").textContent = "Automated data synced";
       } catch (error) {
         renderStats([]); renderTable([]); drawChart([]);
         el("status").classList.add("error"); el("status-text").textContent = "Sync failed";
@@ -615,24 +541,6 @@
 
     el("search").addEventListener("input", updateSearch);
     window.addEventListener("resize", () => { const wl = applyLocal(allRows); drawChart(wl); });
-
-    el("copy-csv-btn").addEventListener("click", () => {
-      const csv = generateUpdatedCSV();
-      navigator.clipboard.writeText(csv).then(() => {
-        showToast("CSV copied to clipboard — paste into bets-log.csv and push", "success");
-      }).catch(() => {
-        const ta = document.createElement("textarea"); ta.value = csv; ta.style.position = "fixed"; ta.style.opacity = "0";
-        document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
-        showToast("CSV copied to clipboard", "success");
-      });
-    });
-
-    el("clear-local-btn").addEventListener("click", () => {
-      localResults = {}; saveLocalResults(); refreshAll(); showToast("Local results cleared", "success");
-    });
-    el("clear-all-link").addEventListener("click", (e) => {
-      e.preventDefault(); localResults = {}; saveLocalResults(); refreshAll(); showToast("All local results cleared", "success");
-    });
 
     loadLog();
   </script>

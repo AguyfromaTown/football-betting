@@ -20,6 +20,18 @@ SPEC.loader.exec_module(bot)
 
 
 class FootballBotTests(unittest.TestCase):
+    def test_dashboard_uses_automated_data_sources_and_wl_results(self):
+        html = (MODULE_PATH.parent.parent / "docs" / "index.html").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('predictions-log.csv', html)
+        self.assertIn('performance-summary.md', html)
+        self.assertIn('bankroll.txt', html)
+        self.assertIn('["w","win","won"]', html)
+        self.assertNotIn('Click any <b', html)
+        self.assertNotIn('copy-csv-btn', html)
+
     def test_structured_picks_are_parsed(self):
         report = """## MACHINE READABLE PICKS
 ```json
