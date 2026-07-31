@@ -15,7 +15,7 @@ import sys
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -27,6 +27,7 @@ LOG_FILE = REPO_ROOT / "bets-log.csv"
 AUDIT_FILE = REPO_ROOT / "predictions-log.csv"
 PERFORMANCE_FILE = REPO_ROOT / "performance-summary.md"
 BACKTEST_FILE = REPO_ROOT / "backtest-summary.md"
+PENDING_FILE = REPO_ROOT / "pending-bets.csv"
 REPORTS_DIR = REPO_ROOT / "reports"
 
 REQUEST_TIMEOUT = 30
@@ -69,6 +70,7 @@ def parse_args():
     parser.add_argument("--force", action="store_true", help="Run even if bets already logged for this date")
     parser.add_argument("--settle-only", action="store_true", help="Settle pending bets without generating picks")
     parser.add_argument("--backtest-only", action="store_true", help="Rebuild analytics without external calls")
+    parser.add_argument("--revalidate-only", action="store_true", help="Refresh and authorize pending bets near kickoff")
     parser.add_argument("--leagues", default=None, help="Comma-separated league filter (e.g., EPL,LaLiga,SerieA)")
     return parser.parse_args()
 
@@ -208,6 +210,7 @@ def fetch_matches_from_espn_api(date_str: str) -> list[dict]:
 
         matches.append({
             "event_id": str(event.get("id", "")),
+            "start_time": event.get("date") or competition.get("date") or "",
             "team1": home_name,
             "team2": away_name,
             "score": f"{home.get('score', '')}-{away.get('score', '')}",
@@ -1490,11 +1493,11 @@ def append_prediction_audit(
                 continue
             item = validated.get(normalize_team_name(team))
             decision = (
-                item["grade"] if normalize_team_name(team) in selected
+                "Pending" if normalize_team_name(team) in selected
                 else "Watchlist" if item else "Rejected"
             )
             if normalize_team_name(team) in selected:
-                reason = "authorized"
+                reason = "awaiting_pre_kickoff_check"
             elif item and item.get("grade") in {"Top Pick", "Value Pick"}:
                 reason = "portfolio_limit"
             elif item:
@@ -1697,6 +1700,135 @@ def generate_backtest_summary(resolved: list[dict]):
     log(f"Backtest summary saved: {BACKTEST_FILE.name}")
 
 
+PENDING_HEADERS = [
+    "DATE", "MATCH", "TEAM1", "TEAM2", "PICK", "COMPETITION", "KICKOFF",
+    "ESPN_EVENT_ID", "ODDS_EVENT_ID", "GRADE", "ODDS_MIN", "ODDS_MAX",
+    "DISCOVERY_ODDS", "DISCOVERY_PROBABILITY", "DISCOVERY_EV", "DISCOVERED_AT",
+    "STATUS", "REASON", "FINAL_ODDS", "FINAL_PROBABILITY", "FINAL_EV",
+    "FINAL_BOOKMAKERS", "FINAL_SOURCE", "REVALIDATED_AT", "PRICE_MOVEMENT",
+]
+
+
+def stage_pending_bets(date_str: str, recommendations: list[dict], odds_min: float, odds_max: float) -> int:
+    existing = set()
+    old_rows = []
+    if PENDING_FILE.exists() and PENDING_FILE.stat().st_size:
+        with PENDING_FILE.open(newline="", encoding="utf-8") as handle:
+            old_rows = list(csv.DictReader(handle))
+            existing = {(row.get("DATE"), normalize_team_name(row.get("PICK", ""))) for row in old_rows}
+    staged = 0
+    now = datetime.now(timezone.utc).isoformat()
+    for rec in recommendations:
+        match = rec.get("match") or {}; key = (date_str, normalize_team_name(rec.get("team", "")))
+        if key in existing:
+            continue
+        old_rows.append({
+            "DATE": date_str, "MATCH": f"{match.get('team1', '')} vs {match.get('team2', '')}",
+            "TEAM1": match.get("team1", ""), "TEAM2": match.get("team2", ""), "PICK": rec["team"],
+            "COMPETITION": match.get("tournament", ""), "KICKOFF": match.get("start_time", ""),
+            "ESPN_EVENT_ID": match.get("event_id", ""), "ODDS_EVENT_ID": match.get("odds_api_event_id", ""),
+            "GRADE": rec["grade"], "ODDS_MIN": odds_min, "ODDS_MAX": odds_max,
+            "DISCOVERY_ODDS": f"{rec['odds']:.3f}", "DISCOVERY_PROBABILITY": f"{rec['assessed_probability']:.6f}",
+            "DISCOVERY_EV": f"{rec['ev']:.6f}", "DISCOVERED_AT": now, "STATUS": "pending_revalidation",
+            "REASON": "awaiting_pre_kickoff_check",
+        })
+        existing.add(key); staged += 1
+    if staged:
+        with PENDING_FILE.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=PENDING_HEADERS, extrasaction="ignore"); writer.writeheader(); writer.writerows(old_rows)
+    log(f"Staged {staged} candidate(s) for pre-kickoff revalidation")
+    return staged
+
+
+def update_audit_lifecycle(date_str: str, pick: str, decision: str, reason: str):
+    if not AUDIT_FILE.exists() or not AUDIT_FILE.stat().st_size:
+        return
+    with AUDIT_FILE.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle); rows, headers = list(reader), reader.fieldnames
+    changed = False
+    for row in rows:
+        if row.get("DATE") == date_str and normalize_team_name(row.get("PICK", "")) == normalize_team_name(pick):
+            row["DECISION"], row["REASON"] = decision, reason; changed = True
+    if changed:
+        with AUDIT_FILE.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=headers); writer.writeheader(); writer.writerows(rows)
+
+
+def kickoff_state(value: str, now: datetime, window_minutes: int = 90) -> str:
+    if not value:
+        return "missing"
+    try:
+        kickoff = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if kickoff.tzinfo is None: kickoff = kickoff.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return "missing"
+    minutes = (kickoff - now).total_seconds() / 60
+    if minutes < -5: return "passed"
+    if minutes > window_minutes: return "waiting"
+    return "ready"
+
+
+def revalidate_pending_bets(api_keys: list[str], now: datetime | None = None) -> tuple[int, int]:
+    if not PENDING_FILE.exists() or not PENDING_FILE.stat().st_size:
+        log("No pending bets to revalidate")
+        return 0, 0
+    now = now or datetime.now(timezone.utc)
+    with PENDING_FILE.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    ready_by_date = {}
+    cancelled = 0
+    for row in rows:
+        if row.get("STATUS") != "pending_revalidation":
+            continue
+        state = kickoff_state(row.get("KICKOFF", ""), now)
+        if state == "waiting":
+            continue
+        if state in {"missing", "passed"}:
+            row["STATUS"], row["REASON"] = "cancelled", "kickoff_unknown" if state == "missing" else "kickoff_passed"
+            row["REVALIDATED_AT"] = now.isoformat(); cancelled += 1
+            update_audit_lifecycle(row["DATE"], row["PICK"], "Cancelled", row["REASON"])
+        else:
+            ready_by_date.setdefault(row["DATE"], []).append(row)
+    bankroll = float(BANKROLL_FILE.read_text().strip() or 0) if BANKROLL_FILE.exists() else None
+    authorized_recs, authorized_matches = [], []
+    for date_str, candidates in ready_by_date.items():
+        matches = fetch_matches_all(date_str)
+        enrich_with_multi_bookmaker_odds(matches, date_str, api_keys)
+        enrich_matches_with_goal_model(matches, date_str)
+        for row in candidates:
+            match = next((m for m in matches if {normalize_team_name(m["team1"]), normalize_team_name(m["team2"])} == {normalize_team_name(row["TEAM1"]), normalize_team_name(row["TEAM2"])}), None)
+            reason = None; baseline = calculate_team_baseline(match, row["PICK"]) if match else None
+            if not match or not baseline: reason = "market_unavailable"
+            elif int(match.get("bookmaker_count") or 0) < 2: reason = "insufficient_bookmakers"
+            elif not float(row["ODDS_MIN"]) <= baseline["team_odds"] <= float(row["ODDS_MAX"]): reason = "price_outside_range"
+            elif not baseline_is_reliable(baseline): reason = "model_disagreement"
+            elif baseline["ev"] <= 0.05: reason = "edge_disappeared"
+            row["REVALIDATED_AT"] = now.isoformat()
+            if reason:
+                row["STATUS"], row["REASON"] = "cancelled", reason; cancelled += 1
+                update_audit_lifecycle(row["DATE"], row["PICK"], "Cancelled", reason)
+                continue
+            row.update({
+                "STATUS": "authorized", "REASON": "pre_kickoff_validated", "FINAL_ODDS": f"{baseline['team_odds']:.3f}",
+                "FINAL_PROBABILITY": f"{baseline['assessed_probability']:.6f}", "FINAL_EV": f"{baseline['ev']:.6f}",
+                "FINAL_BOOKMAKERS": match.get("bookmaker_count", 0), "FINAL_SOURCE": match.get("odds_source", ""),
+                "PRICE_MOVEMENT": f"{baseline['team_odds'] / float(row['DISCOVERY_ODDS']) - 1:.6f}",
+            })
+            authorized_recs.append({"_date": row["DATE"], "team": row["PICK"], "grade": row["GRADE"], "odds": baseline["team_odds"], "assessed_probability": baseline["assessed_probability"], "ev": baseline["ev"], "match": match})
+            authorized_matches.append(match)
+            update_audit_lifecycle(row["DATE"], row["PICK"], "Authorized", "pre_kickoff_validated")
+    total_stake = 0.0
+    for date_str in sorted({rec["_date"] for rec in authorized_recs}):
+        recs = [rec for rec in authorized_recs if rec["_date"] == date_str]
+        total_stake += log_bets(date_str, recs, authorized_matches, bankroll - total_stake if bankroll is not None else None)
+    if total_stake:
+        save_bankroll(bankroll, total_stake)
+    with PENDING_FILE.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PENDING_HEADERS, extrasaction="ignore"); writer.writeheader(); writer.writerows(rows)
+    log(f"Pre-kickoff revalidation authorized {len(authorized_recs)}, cancelled {cancelled}")
+    return len(authorized_recs), cancelled
+
+
 def log_bets(
     date_str: str,
     recommendations: list[dict],
@@ -1808,8 +1940,8 @@ def add_validation_summary(
         "",
         (
             f"The analysis produced {candidate_count} candidate(s). "
-            f"Python accepted {len(recommendations)} bet(s) after matching "
-            "verified team-specific odds and recalculating expected value."
+            f"Python staged {len(recommendations)} candidate(s) after matching "
+            "verified odds and recalculating EV. These are not bets until the pre-kickoff workflow authorizes them."
         ),
     ]
     if recommendations:
@@ -1840,6 +1972,13 @@ def already_logged_today(date_str: str) -> bool:
     return False
 
 
+def already_pending_today(date_str: str) -> bool:
+    if not PENDING_FILE.exists() or not PENDING_FILE.stat().st_size:
+        return False
+    with PENDING_FILE.open(newline="", encoding="utf-8") as handle:
+        return any(row.get("DATE") == date_str and row.get("STATUS") == "pending_revalidation" for row in csv.DictReader(handle))
+
+
 def main():
     args = parse_args()
     date_str = resolve_date(args.date)
@@ -1857,15 +1996,26 @@ def main():
         log("Backtest-only run complete")
         return
 
+    odds_api_keys = [value for value in (
+        os.environ.get("ODDS_API_KEY"), os.environ.get("ODDS_API_KEY_2"),
+        os.environ.get("ODDS_API_KEY_3"), os.environ.get("ODDS_API_KEY_4"),
+        os.environ.get("ODDS_API_KEY_5"),
+    ) if value]
+
     settle_pending_bets()
     generate_performance_summary()
+
+    if args.revalidate_only:
+        revalidate_pending_bets(odds_api_keys)
+        generate_performance_summary()
+        return
 
     if args.settle_only:
         log("Settlement-only run complete")
         return
 
-    if not args.force and already_logged_today(date_str):
-        log(f"Bets already logged for {date_str}. Skipping.")
+    if not args.force and (already_logged_today(date_str) or already_pending_today(date_str)):
+        log(f"Bets already logged or awaiting revalidation for {date_str}. Skipping.")
         log("(Use --force to override.)")
         return
 
@@ -1877,11 +2027,6 @@ def main():
     if not all_matches:
         log("No matches found from web sources. Will use AI knowledge only.")
 
-    odds_api_keys = [value for value in (
-        os.environ.get("ODDS_API_KEY"), os.environ.get("ODDS_API_KEY_2"),
-        os.environ.get("ODDS_API_KEY_3"), os.environ.get("ODDS_API_KEY_4"),
-        os.environ.get("ODDS_API_KEY_5"),
-    ) if value]
     enrich_with_multi_bookmaker_odds(all_matches, date_str, odds_api_keys)
 
     qualified = attach_odds(all_matches, odds_min, odds_max)
@@ -1942,10 +2087,8 @@ def main():
     ]
     authorized_bets = select_portfolio(validated_bets)
     append_prediction_audit(date_str, qualified, recommendations, authorized_bets)
-    log(f"Authorized {len(authorized_bets)} Top/Value bets for logging")
-    total_stake = log_bets(date_str, authorized_bets, qualified, bankroll)
-
-    save_bankroll(bankroll, total_stake)
+    log(f"Staging {len(authorized_bets)} Top/Value candidates for pre-kickoff validation")
+    stage_pending_bets(date_str, authorized_bets, odds_min, odds_max)
     final_report = add_validation_summary(
         report,
         len(candidates),

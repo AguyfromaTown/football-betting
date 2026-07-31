@@ -31,6 +31,8 @@ class FootballBotTests(unittest.TestCase):
         self.assertIn('["w","win","won"]', html)
         self.assertIn('id="audit-body"', html)
         self.assertIn('id="backtest-body"', html)
+        self.assertIn('pending-bets.csv', html)
+        self.assertIn('id="pending-body"', html)
         self.assertNotIn('Click any <b', html)
         self.assertNotIn('copy-csv-btn', html)
 
@@ -358,9 +360,56 @@ class FootballBotTests(unittest.TestCase):
         self.assertEqual(second, 0.0)
         self.assertEqual(len(rows), 2)
 
+    def test_staging_pending_bet_does_not_touch_bankroll_or_bet_log(self):
+        recommendation = {"team": "Home", "grade": "Value Pick", "odds": 1.8, "assessed_probability": 0.6, "ev": 0.08, "match": {"team1": "Home", "team2": "Away", "tournament": "EPL", "start_time": "2026-08-01T18:00:00Z", "event_id": "1", "odds_api_event_id": "2"}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); pending = root / "pending.csv"; bankroll = root / "bankroll.txt"; log_file = root / "bets.csv"
+            bankroll.write_text("100.00", encoding="utf-8")
+            with patch.object(bot, "PENDING_FILE", pending), patch.object(bot, "BANKROLL_FILE", bankroll), patch.object(bot, "LOG_FILE", log_file):
+                staged = bot.stage_pending_bets("2026-08-01", [recommendation], 1.5, 3.0)
+
+            with pending.open(encoding="utf-8") as handle:
+                rows = list(__import__("csv").DictReader(handle))
+            self.assertEqual(staged, 1)
+            self.assertEqual(rows[0]["STATUS"], "pending_revalidation")
+            self.assertEqual(bankroll.read_text(encoding="utf-8"), "100.00")
+            self.assertFalse(log_file.exists())
+
+    def test_kickoff_state_controls_revalidation_window(self):
+        now = __import__("datetime").datetime(2026, 8, 1, 12, 0, tzinfo=__import__("datetime").timezone.utc)
+        self.assertEqual(bot.kickoff_state("2026-08-01T15:00:00Z", now), "waiting")
+        self.assertEqual(bot.kickoff_state("2026-08-01T13:00:00Z", now), "ready")
+        self.assertEqual(bot.kickoff_state("", now), "missing")
+
+    def test_revalidation_authorizes_and_only_then_deducts_stake(self):
+        now = __import__("datetime").datetime(2026, 8, 1, 12, 0, tzinfo=__import__("datetime").timezone.utc)
+        match = {"team1": "Home", "team2": "Away", "tournament": "EPL", "home_odds": 2.0, "draw_odds": 4.0, "away_odds": 4.0, "home_form": "WWWWW", "away_form": "LLLLL", "home_record": "8-1-1", "away_record": "1-1-8", "bookmaker_count": 3, "odds_source": "A/B/C"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); pending = root / "pending.csv"; bankroll = root / "bankroll.txt"; log_file = root / "bets.csv"
+            bankroll.write_text("100.00", encoding="utf-8")
+            pending.write_text(
+                ",".join(bot.PENDING_HEADERS) + "\n" +
+                "2026-08-01,Home vs Away,Home,Away,Home,EPL,2026-08-01T13:00:00Z,1,2,Value Pick,1.5,3.0,1.90,0.60,0.14,2026-08-01T06:00:00Z,pending_revalidation,awaiting_pre_kickoff_check,,,,,,,,\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.object(bot, "PENDING_FILE", pending), patch.object(bot, "BANKROLL_FILE", bankroll),
+                patch.object(bot, "LOG_FILE", log_file), patch.object(bot, "AUDIT_FILE", root / "audit.csv"),
+                patch.object(bot, "fetch_matches_all", return_value=[match]),
+                patch.object(bot, "enrich_with_multi_bookmaker_odds"), patch.object(bot, "enrich_matches_with_goal_model"),
+            ):
+                authorized, cancelled = bot.revalidate_pending_bets(["key"], now)
+
+            with pending.open(encoding="utf-8") as handle:
+                row = next(__import__("csv").DictReader(handle))
+            self.assertEqual((authorized, cancelled), (1, 0))
+            self.assertEqual(row["STATUS"], "authorized")
+            self.assertEqual(float(bankroll.read_text(encoding="utf-8")), 98.0)
+            self.assertTrue(log_file.exists())
+
     def test_validation_footer_marks_no_bets_authoritatively(self):
         result = bot.add_validation_summary("## TOP PICKS\nCandidate", 1, [])
-        self.assertIn("Python accepted 0 bet(s)", result)
+        self.assertIn("Python staged 0 candidate(s)", result)
         self.assertIn("Final betting decision: NO BETS", result)
 
     def test_settlement_credits_full_winning_return(self):
