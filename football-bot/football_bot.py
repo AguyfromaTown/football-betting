@@ -403,6 +403,66 @@ def fetch_odds_for_match(team1: str, team2: str) -> tuple[float | None, str | No
     return None, None, None
 
 
+def extract_three_way_market(payload: dict) -> dict:
+    prices = []
+    for bookmaker, markets in (payload.get("bookmakers") or {}).items():
+        for market in markets or []:
+            if str(market.get("name", "")).strip().lower() not in {"ml", "moneyline", "match winner", "winner", "full time result", "1x2"}:
+                continue
+            for quote in market.get("odds") or []:
+                try:
+                    home, draw, away = float(quote["home"]), float(quote["draw"]), float(quote["away"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if min(home, draw, away) > 1:
+                    prices.append((home, draw, away, bookmaker))
+    if not prices:
+        return {"best_home": None, "best_draw": None, "best_away": None, "consensus_home": None, "consensus_draw": None, "consensus_away": None, "source": None, "bookmaker_count": 0}
+    def median(values):
+        values = sorted(values); middle = len(values) // 2
+        return values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
+    best_home, best_draw, best_away = max(prices, key=lambda x: x[0]), max(prices, key=lambda x: x[1]), max(prices, key=lambda x: x[2])
+    return {
+        "best_home": best_home[0], "best_draw": best_draw[1], "best_away": best_away[2],
+        "consensus_home": median([p[0] for p in prices]), "consensus_draw": median([p[1] for p in prices]), "consensus_away": median([p[2] for p in prices]),
+        "source": "/".join(dict.fromkeys((best_home[3], best_draw[3], best_away[3]))), "bookmaker_count": len(prices),
+    }
+
+
+def enrich_with_multi_bookmaker_odds(matches: list[dict], date_str: str, api_keys: list[str]) -> int:
+    """Overlay best prices and consensus prices while retaining ESPN fallback data."""
+    if not api_keys:
+        log("No Odds API keys configured; using ESPN odds fallback")
+        return 0
+    payload, key_index = fetch_odds_json("https://api.odds-api.io/v3/events", {"sport": "football", "from": f"{date_str}T00:00:00Z", "to": f"{date_str}T23:59:59Z"}, api_keys, 0)
+    events = payload if isinstance(payload, list) else (payload or {}).get("events", []) if isinstance(payload, dict) else []
+    local_by_pair = {tuple(sorted((normalize_team_name(m["team1"]), normalize_team_name(m["team2"])))): m for m in matches}
+    matched_events = [event for event in events if tuple(sorted((normalize_team_name(event.get("home", "")), normalize_team_name(event.get("away", ""))))) in local_by_pair]
+    enriched = 0
+    for start in range(0, len(matched_events), 10):
+        batch = matched_events[start:start + 10]
+        odds_payload, key_index = fetch_odds_json("https://api.odds-api.io/v3/odds/multi", {"eventIds": ",".join(str(event.get("id")) for event in batch), "bookmakers": "Pinnacle,Bet365,Unibet,William Hill,Betway"}, api_keys, key_index)
+        odds_events = odds_payload if isinstance(odds_payload, list) else (odds_payload or {}).get("events", []) if isinstance(odds_payload, dict) else []
+        for event in odds_events:
+            match = local_by_pair.get(tuple(sorted((normalize_team_name(event.get("home", "")), normalize_team_name(event.get("away", ""))))))
+            market = extract_three_way_market(event)
+            if not match or not market["best_home"]:
+                continue
+            api_home_is_local_home = normalize_team_name(event.get("home", "")) == normalize_team_name(match["team1"])
+            match.update({
+                "home_odds": market["best_home"] if api_home_is_local_home else market["best_away"],
+                "away_odds": market["best_away"] if api_home_is_local_home else market["best_home"],
+                "draw_odds": market["best_draw"],
+                "consensus_home_odds": market["consensus_home"] if api_home_is_local_home else market["consensus_away"],
+                "consensus_away_odds": market["consensus_away"] if api_home_is_local_home else market["consensus_home"],
+                "consensus_draw_odds": market["consensus_draw"],
+                "bookmaker_count": market["bookmaker_count"], "odds_source": market["source"], "odds_api_event_id": str(event.get("id", "")),
+            })
+            enriched += 1
+    log(f"Multi-bookmaker consensus matched {enriched}/{len(matches)} football matches")
+    return enriched
+
+
 def attach_odds(matches: list[dict], odds_min: float, odds_max: float) -> list[dict]:
     """Fetch odds for each match and filter by range."""
     log("Fetching odds for matches...")
@@ -483,6 +543,25 @@ def record_points_rate(summary: str | None) -> float | None:
     return (3 * wins + draws) / (3 * played) if played else None
 
 
+def fetch_odds_json(url: str, params: dict, api_keys: list[str], key_index: int) -> tuple[object | None, int]:
+    """Fetch Odds-API.io data and rotate keys on auth or quota failures."""
+    for offset in range(len(api_keys)):
+        candidate = (key_index + offset) % len(api_keys)
+        try:
+            response = requests.get(url, params={**params, "apiKey": api_keys[candidate]}, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
+            if response.status_code in {401, 403, 429}:
+                log(f"  Odds API key {candidate + 1}/{len(api_keys)} unavailable ({response.status_code}); rotating")
+                continue
+            response.raise_for_status()
+            return response.json(), candidate
+        except (requests.RequestException, ValueError) as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            log(f"  Odds API request failed for {url}: {'HTTP ' + str(status) if status else type(exc).__name__}")
+            return None, candidate
+    log("  All configured Odds API keys are unavailable or out of quota")
+    return None, key_index
+
+
 def form_points_rate(form: str | None) -> float | None:
     """Convert a compact form string such as WWLLD to a normalized points rate."""
     results = [char for char in (form or "").upper() if char in "WDL"]
@@ -522,12 +601,12 @@ def calculate_team_baseline(match: dict, team: str) -> dict | None:
     else:
         return None
 
-    inverse_total = (
-        1 / float(home_odds)
-        + 1 / float(away_odds)
-        + 1 / float(draw_odds)
-    )
-    market_probability = (1 / team_odds) / inverse_total
+    consensus_home = float(match.get("consensus_home_odds") or home_odds)
+    consensus_away = float(match.get("consensus_away_odds") or away_odds)
+    consensus_draw = float(match.get("consensus_draw_odds") or draw_odds)
+    inverse_total = 1 / consensus_home + 1 / consensus_away + 1 / consensus_draw
+    consensus_team_odds = consensus_home if team_key == normalize_team_name(match["team1"]) else consensus_away
+    market_probability = (1 / consensus_team_odds) / inverse_total
 
     evidence = []
     if team_form is not None and opponent_form is not None:
@@ -1211,6 +1290,8 @@ def evidence_quality(match: dict, baseline: dict) -> tuple[int, str]:
     points += 1 if (match.get("level") or "Unknown") != "Unknown" else 0
     points += 1 if len(match.get("home_form") or "") >= 5 and len(match.get("away_form") or "") >= 5 else 0
     points += 1 if match.get("home_record") and match.get("away_record") else 0
+    bookmakers = int(match.get("bookmaker_count") or 0)
+    points += 2 if bookmakers >= 3 else 1 if bookmakers >= 2 else 0
     grade = "A" if points >= 9 else "B" if points >= 7 else "C" if points >= 5 else "D"
     return points, grade
 
@@ -1226,7 +1307,7 @@ def append_prediction_audit(
         "DATE", "EVENT_ID", "MATCH", "PICK", "OPENING_ODDS",
         "MARKET_PROBABILITY", "MODEL_PROBABILITY", "EV", "SCORE",
         "EVIDENCE", "QUALITY_SCORE", "QUALITY_GRADE", "COMPETITION",
-        "LEVEL", "SIDE", "DECISION", "REASON", "RESULT", "CLOSING_ODDS", "CLV",
+        "LEVEL", "SIDE", "BOOKMAKERS", "ODDS_SOURCE", "DECISION", "REASON", "RESULT", "CLOSING_ODDS", "CLV",
     ]
     if AUDIT_FILE.exists() and AUDIT_FILE.stat().st_size:
         with open(AUDIT_FILE, newline="", encoding="utf-8") as handle:
@@ -1285,7 +1366,8 @@ def append_prediction_audit(
                 f"{baseline['ev']:.6f}", f"{baseline['score']:.3f}",
                 "reliable" if baseline_is_reliable(baseline) else "insufficient",
                 quality_score, quality_grade, match.get("tournament") or "Unknown",
-                match.get("level") or "Unknown", side,
+                match.get("level") or "Unknown", side, match.get("bookmaker_count") or 0,
+                match.get("odds_source") or "ESPN",
                 decision, reason, "", "", "",
             ])
     if not rows:
@@ -1637,6 +1719,13 @@ def main():
     all_matches = fetch_matches_all(date_str, leagues)
     if not all_matches:
         log("No matches found from web sources. Will use AI knowledge only.")
+
+    odds_api_keys = [value for value in (
+        os.environ.get("ODDS_API_KEY"), os.environ.get("ODDS_API_KEY_2"),
+        os.environ.get("ODDS_API_KEY_3"), os.environ.get("ODDS_API_KEY_4"),
+        os.environ.get("ODDS_API_KEY_5"),
+    ) if value]
+    enrich_with_multi_bookmaker_odds(all_matches, date_str, odds_api_keys)
 
     qualified = attach_odds(all_matches, odds_min, odds_max)
 

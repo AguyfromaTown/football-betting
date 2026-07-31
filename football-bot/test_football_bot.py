@@ -359,6 +359,36 @@ class FootballBotTests(unittest.TestCase):
         self.assertEqual(bot.american_to_decimal(-200), 1.5)
         self.assertIsNone(bot.american_to_decimal(None))
 
+    def test_three_way_market_uses_best_prices_and_median_consensus(self):
+        payload = {"bookmakers": {
+            "A": [{"name": "1X2", "odds": [{"home": "2.0", "draw": "3.2", "away": "4.0"}]}],
+            "B": [{"name": "Match Winner", "odds": [{"home": "2.2", "draw": "3.0", "away": "3.8"}]}],
+            "C": [{"name": "ML", "odds": [{"home": "2.1", "draw": "3.1", "away": "3.9"}]}],
+        }}
+
+        market = bot.extract_three_way_market(payload)
+
+        self.assertEqual(market["best_home"], 2.2)
+        self.assertEqual(market["best_draw"], 3.2)
+        self.assertEqual(market["best_away"], 4.0)
+        self.assertEqual(market["consensus_home"], 2.1)
+        self.assertEqual(market["consensus_draw"], 3.1)
+        self.assertEqual(market["bookmaker_count"], 3)
+
+    def test_baseline_uses_consensus_for_probability_and_best_price_for_ev(self):
+        match = {
+            "team1": "Home", "team2": "Away",
+            "home_odds": 2.2, "draw_odds": 3.2, "away_odds": 4.0,
+            "consensus_home_odds": 2.0, "consensus_draw_odds": 3.0, "consensus_away_odds": 4.0,
+            "home_form": "DDDDD", "away_form": "DDDDD",
+            "home_record": "0-10-0", "away_record": "0-10-0",
+        }
+
+        baseline = bot.calculate_team_baseline(match, "Home")
+
+        self.assertAlmostEqual(baseline["market_probability"], 0.461538, places=5)
+        self.assertAlmostEqual(baseline["ev"], baseline["assessed_probability"] * 2.2 - 1)
+
     def test_parser_accepts_colon_after_odds(self):
         report = """## TOP PICKS
 1. **Liverpool vs. Chelsea (EPL)**

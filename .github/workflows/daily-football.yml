@@ -56,6 +56,11 @@ jobs:
       - name: Run football bot
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          ODDS_API_KEY_2: ${{ secrets.ODDS_API_KEY_2 }}
+          ODDS_API_KEY_3: ${{ secrets.ODDS_API_KEY_3 }}
+          ODDS_API_KEY_4: ${{ secrets.ODDS_API_KEY_4 }}
+          ODDS_API_KEY_5: ${{ secrets.ODDS_API_KEY_5 }}
         run: |
           ARGS=""
           if [ -n "${{ github.event.inputs.date }}" ]; then

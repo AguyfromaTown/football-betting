@@ -327,7 +327,7 @@
         <span class="count" id="audit-row-count">0 predictions</span>
       </div>
       <div class="table-scroll"><table id="audit-table">
-        <thead><tr><th>Date</th><th>Team</th><th>Competition</th><th>Level</th><th>Side</th><th>Quality</th><th>Odds</th><th>Probability</th><th>EV</th><th>Decision</th><th>Reason</th><th>Result</th><th>CLV</th></tr></thead>
+        <thead><tr><th>Date</th><th>Team</th><th>Competition</th><th>Level</th><th>Side</th><th>Quality</th><th>Books</th><th>Price source</th><th>Odds</th><th>Probability</th><th>EV</th><th>Decision</th><th>Reason</th><th>Result</th><th>CLV</th></tr></thead>
         <tbody id="audit-body"></tbody>
       </table></div>
     </section>
@@ -487,7 +487,7 @@
       el("audit-body").innerHTML = recent.map(row => {
         const result = String(row.result || "").toLowerCase();
         const resultCell = ["w","win","won"].includes(result) ? `<span class="badge win">Won</span>` : ["l","loss","lost"].includes(result) ? `<span class="badge loss">Lost</span>` : `<span class="badge pending">Open</span>`;
-        return `<tr><td>${safe(row.date || "—")}</td><td>${safe(row.pick || "—")}</td><td>${safe(row.competition || "—")}</td><td>${safe(row.level || "—")}</td><td>${safe(row.side || "—")}</td><td>${safe(row.quality_grade || "—")}</td><td>${safe(row.opening_odds || "—")}</td><td>${safe(percent(row.model_probability))}</td><td>${safe(percent(row.ev))}</td><td>${safe(row.decision || "—")}</td><td>${safe(row.reason || "—")}</td><td>${resultCell}</td><td>${safe(percent(row.clv))}</td></tr>`;
+        return `<tr><td>${safe(row.date || "—")}</td><td>${safe(row.pick || "—")}</td><td>${safe(row.competition || "—")}</td><td>${safe(row.level || "—")}</td><td>${safe(row.side || "—")}</td><td>${safe(row.quality_grade || "—")}</td><td>${safe(row.bookmakers || "—")}</td><td>${safe(row.odds_source || "—")}</td><td>${safe(row.opening_odds || "—")}</td><td>${safe(percent(row.model_probability))}</td><td>${safe(percent(row.ev))}</td><td>${safe(row.decision || "—")}</td><td>${safe(row.reason || "—")}</td><td>${resultCell}</td><td>${safe(percent(row.clv))}</td></tr>`;
       }).join("");
       el("audit-row-count").textContent = `${rows.length} audited predictions`;
     }
