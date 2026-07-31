@@ -28,6 +28,7 @@ AUDIT_FILE = REPO_ROOT / "predictions-log.csv"
 PERFORMANCE_FILE = REPO_ROOT / "performance-summary.md"
 BACKTEST_FILE = REPO_ROOT / "backtest-summary.md"
 PENDING_FILE = REPO_ROOT / "pending-bets.csv"
+TEAM_ALIASES_FILE = REPO_ROOT / "team-aliases.csv"
 REPORTS_DIR = REPO_ROOT / "reports"
 
 REQUEST_TIMEOUT = 30
@@ -41,6 +42,9 @@ MIN_SEGMENT_SAMPLE = 30
 MIN_WEIGHT_TRAINING_SAMPLE = 200
 KELLY_FRACTION = 0.25
 MIN_STAKE_RATE = 0.005
+MAX_PRICE_MOVEMENT = 0.10
+MAX_BOOKMAKER_DISPERSION = 0.12
+MAX_BETS_PER_COMPETITION = 2
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -429,14 +433,18 @@ def extract_three_way_market(payload: dict) -> dict:
                 if min(home, draw, away) > 1:
                     prices.append((home, draw, away, bookmaker))
     if not prices:
-        return {"best_home": None, "best_draw": None, "best_away": None, "consensus_home": None, "consensus_draw": None, "consensus_away": None, "source": None, "bookmaker_count": 0}
+        return {"best_home": None, "best_draw": None, "best_away": None, "consensus_home": None, "consensus_draw": None, "consensus_away": None, "source": None, "bookmaker_count": 0, "home_dispersion": None, "draw_dispersion": None, "away_dispersion": None}
     def median(values):
         values = sorted(values); middle = len(values) // 2
         return values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
     best_home, best_draw, best_away = max(prices, key=lambda x: x[0]), max(prices, key=lambda x: x[1]), max(prices, key=lambda x: x[2])
+    consensus_home, consensus_draw, consensus_away = median([p[0] for p in prices]), median([p[1] for p in prices]), median([p[2] for p in prices])
     return {
         "best_home": best_home[0], "best_draw": best_draw[1], "best_away": best_away[2],
-        "consensus_home": median([p[0] for p in prices]), "consensus_draw": median([p[1] for p in prices]), "consensus_away": median([p[2] for p in prices]),
+        "consensus_home": consensus_home, "consensus_draw": consensus_draw, "consensus_away": consensus_away,
+        "home_dispersion": (max(p[0] for p in prices) - min(p[0] for p in prices)) / consensus_home,
+        "draw_dispersion": (max(p[1] for p in prices) - min(p[1] for p in prices)) / consensus_draw,
+        "away_dispersion": (max(p[2] for p in prices) - min(p[2] for p in prices)) / consensus_away,
         "source": "/".join(dict.fromkeys((best_home[3], best_draw[3], best_away[3]))), "bookmaker_count": len(prices),
     }
 
@@ -469,6 +477,9 @@ def enrich_with_multi_bookmaker_odds(matches: list[dict], date_str: str, api_key
                 "consensus_away_odds": market["consensus_away"] if api_home_is_local_home else market["consensus_home"],
                 "consensus_draw_odds": market["consensus_draw"],
                 "bookmaker_count": market["bookmaker_count"], "odds_source": market["source"], "odds_api_event_id": str(event.get("id", "")),
+                "home_dispersion": market["home_dispersion"] if api_home_is_local_home else market["away_dispersion"],
+                "away_dispersion": market["away_dispersion"] if api_home_is_local_home else market["home_dispersion"],
+                "draw_dispersion": market["draw_dispersion"],
             })
             enriched += 1
     log(f"Multi-bookmaker consensus matched {enriched}/{len(matches)} football matches")
@@ -591,6 +602,7 @@ FOOTBALL_DATA_LEAGUES = {
     "serie a": "I1", "ligue 1": "F1", "eredivisie": "N1", "primeira liga": "P1",
     "scottish premiership": "SC0", "spfl premiership": "SC0",
 }
+_TEAM_ALIAS_CACHE = {"mtime": None, "aliases": {}}
 
 
 def football_data_code(match: dict) -> str | None:
@@ -695,7 +707,13 @@ def calculate_goal_model(match: dict, rows: list[dict], date_str: str) -> dict |
     home_xg = max(0.25, min(3.5, league_home * home_attack * away_defence))
     away_xg = max(0.20, min(3.0, league_away * away_attack * home_defence))
     probabilities = dixon_coles_probabilities(home_xg, away_xg)
-    return {"home_xg": home_xg, "away_xg": away_xg, "home_sample": len(home_rows), "away_sample": len(away_rows), **probabilities}
+    def rest_days(team_key):
+        dates = [parse_football_date(row.get("Date", "")) for row, *_ in league
+                 if team_key in {normalize_team_name(row.get("HomeTeam", "")), normalize_team_name(row.get("AwayTeam", ""))}]
+        dates = [date for date in dates if date and date < cutoff]
+        return (cutoff - max(dates)).days if dates else None
+    return {"home_xg": home_xg, "away_xg": away_xg, "home_sample": len(home_rows), "away_sample": len(away_rows),
+            "home_rest_days": rest_days(home_key), "away_rest_days": rest_days(away_key), **probabilities}
 
 
 def enrich_matches_with_goal_model(matches: list[dict], date_str: str):
@@ -810,6 +828,54 @@ def competition_uncertainty(match: dict) -> tuple[float, str]:
     return 0.0, "standard"
 
 
+def fetch_lineup_status(match: dict) -> str:
+    """Check ESPN's event summary for released starting lineups."""
+    event_id = match.get("event_id")
+    if not event_id:
+        return "unavailable"
+    body = fetch(f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/summary?event={event_id}")
+    if not body:
+        return "unavailable"
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        return "unavailable"
+    rosters = data.get("rosters") or []
+    teams_with_starters = 0
+    for roster in rosters:
+        athletes = roster.get("roster") or roster.get("athletes") or []
+        if sum(bool(item.get("starter")) for item in athletes) >= 7:
+            teams_with_starters += 1
+    return "confirmed" if teams_with_starters >= 2 else "not_released"
+
+
+def pick_market_dispersion(match: dict, team: str) -> float | None:
+    field = "home_dispersion" if normalize_team_name(team) == normalize_team_name(match.get("team1", "")) else "away_dispersion"
+    value = match.get(field)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def data_quality_assessment(match: dict, baseline: dict, team: str) -> dict:
+    """Combine independent-source coverage and conflicts into an authorization gate."""
+    score, reasons = 0, []
+    books = int(match.get("bookmaker_count") or 0)
+    if books >= 3: score += 3
+    elif books >= 2: score += 2
+    else: reasons.append("insufficient_bookmakers")
+    dispersion = pick_market_dispersion(match, team)
+    if dispersion is not None and dispersion <= .08: score += 2
+    elif dispersion is not None and dispersion <= MAX_BOOKMAKER_DISPERSION: score += 1
+    else: reasons.append("bookmaker_conflict")
+    if baseline.get("goal_home_sample", 0) >= 6 and baseline.get("goal_away_sample", 0) >= 6: score += 2
+    else: reasons.append("goal_history_missing")
+    if baseline.get("complete_evidence") and baseline.get("signals_agree"): score += 2
+    else: reasons.append("form_record_conflict")
+    lineup = match.get("lineup_status", "unavailable")
+    if lineup == "confirmed": score += 1
+    return {"score": score, "grade": "A" if score >= 9 else "B" if score >= 7 else "C" if score >= 5 else "D",
+            "reasons": reasons, "lineup_status": lineup, "dispersion": dispersion}
+
+
 def model_drift_status(rows: list[dict], window: int = 30) -> dict:
     """Compare the latest resolved window with the preceding window."""
     ordered = sorted(rows, key=lambda row: row.get("DATE", ""))
@@ -909,6 +975,11 @@ def calculate_team_baseline(match: dict, team: str) -> dict | None:
     assessed_probability, calibration_sample = calibrate_probability(assessed_probability, comparable)
     uncertainty_penalty, uncertainty_reason = competition_uncertainty(match)
     assessed_probability = max(.02, assessed_probability - uncertainty_penalty)
+    home_side = team_key == normalize_team_name(match["team1"])
+    team_rest = goal_model.get("home_rest_days") if goal_model and home_side else goal_model.get("away_rest_days") if goal_model else None
+    opponent_rest = goal_model.get("away_rest_days") if goal_model and home_side else goal_model.get("home_rest_days") if goal_model else None
+    congestion_penalty = .02 if team_rest is not None and team_rest <= 3 and opponent_rest is not None and opponent_rest >= 5 else .01 if team_rest is not None and team_rest <= 3 else 0.0
+    assessed_probability = max(.02, assessed_probability - congestion_penalty)
     health = segment_health(match, team, team_odds, history)
     ev = assessed_probability * team_odds - 1
     score = max(0.0, min(10.0, 6.0 + max(0.0, ev) * 30))
@@ -932,6 +1003,9 @@ def calculate_team_baseline(match: dict, team: str) -> dict | None:
         "calibration_sample": calibration_sample,
         "uncertainty_penalty": uncertainty_penalty,
         "uncertainty_reason": uncertainty_reason,
+        "team_rest_days": team_rest,
+        "opponent_rest_days": opponent_rest,
+        "congestion_penalty": congestion_penalty,
         "segment_sample": health["sample"],
         "segment_roi": health["roi"],
         "segment_clv": health["clv"],
@@ -1444,11 +1518,23 @@ def parse_recommendations(report: str) -> list[dict]:
 
 def normalize_team_name(name: str) -> str:
     """Normalize punctuation and spacing for model-to-market comparisons."""
-    ascii_name = unicodedata.normalize("NFKD", name.casefold()).encode(
-        "ascii",
-        "ignore",
-    ).decode("ascii")
-    return re.sub(r"[^a-z0-9]+", "", ascii_name)
+    def basic(value):
+        ascii_name = unicodedata.normalize("NFKD", value.casefold()).encode(
+            "ascii", "ignore",
+        ).decode("ascii")
+        return re.sub(r"[^a-z0-9]+", "", ascii_name)
+    normalized = basic(name)
+    if TEAM_ALIASES_FILE.exists() and TEAM_ALIASES_FILE.stat().st_size:
+        try:
+            mtime = TEAM_ALIASES_FILE.stat().st_mtime_ns
+            if _TEAM_ALIAS_CACHE["mtime"] != mtime:
+                with TEAM_ALIASES_FILE.open(newline="", encoding="utf-8") as handle:
+                    _TEAM_ALIAS_CACHE["aliases"] = {basic(row.get("ALIAS", "")): basic(row.get("CANONICAL", "")) for row in csv.DictReader(handle) if row.get("ALIAS") and row.get("CANONICAL")}
+                _TEAM_ALIAS_CACHE["mtime"] = mtime
+            return _TEAM_ALIAS_CACHE["aliases"].get(normalized, normalized)
+        except OSError:
+            pass
+    return normalized
 
 
 def validate_recommendations(
@@ -1568,6 +1654,7 @@ def select_portfolio(
     )
     selected = []
     seen_matches = set()
+    competition_counts = {}
     exposure = 0.0
     for recommendation in ranked:
         stake_rate = stake_rates.get(recommendation.get("grade"))
@@ -1581,11 +1668,16 @@ def select_portfolio(
         if match_key in seen_matches:
             log(f"  Portfolio rejected {recommendation['team']}: match already selected")
             continue
+        competition = normalize_team_name(match.get("tournament", "Unknown"))
+        if competition_counts.get(competition, 0) >= MAX_BETS_PER_COMPETITION:
+            log(f"  Portfolio rejected {recommendation['team']}: competition correlation cap reached")
+            continue
         if len(selected) >= max_bets or exposure + stake_rate > max_exposure + 1e-9:
             log(f"  Portfolio rejected {recommendation['team']}: daily risk cap reached")
             continue
         selected.append(recommendation)
         seen_matches.add(match_key)
+        competition_counts[competition] = competition_counts.get(competition, 0) + 1
         exposure += stake_rate
     log(
         f"Portfolio selected {len(selected)} bet(s) with planned exposure "
@@ -1625,6 +1717,8 @@ def append_prediction_audit(
         "GOAL_AWAY_SAMPLE", "TOP_SCORELINES", "COMPONENT_WEIGHTS", "RAW_PROBABILITY",
         "CHALLENGER_PROBABILITY", "CHALLENGER_SAMPLE", "CHALLENGER_PROMOTED",
         "CALIBRATION_SAMPLE", "UNCERTAINTY_PENALTY", "UNCERTAINTY_REASON",
+        "TEAM_REST_DAYS", "OPPONENT_REST_DAYS", "CONGESTION_PENALTY",
+        "MARKET_DISPERSION", "LINEUP_STATUS", "DATA_QUALITY_SCORE", "DATA_QUALITY_GRADE",
         "SEGMENT_SAMPLE", "SEGMENT_ROI", "SEGMENT_CLV", "SEGMENT_SUSPENDED", "SEGMENT_KEY", "EV", "SCORE",
         "EVIDENCE", "QUALITY_SCORE", "QUALITY_GRADE", "COMPETITION",
         "LEVEL", "SIDE", "BOOKMAKERS", "ODDS_SOURCE", "DECISION", "REASON", "RESULT", "CLOSING_ODDS", "CLV",
@@ -1676,6 +1770,7 @@ def append_prediction_audit(
             else:
                 reason = "not_selected"
             quality_score, quality_grade = evidence_quality(match, baseline)
+            data_quality = data_quality_assessment(match, baseline, team)
             side = "home" if normalize_team_name(team) == normalize_team_name(match["team1"]) else "away"
             rows.append([
                 date_str, match.get("event_id", ""),
@@ -1695,7 +1790,12 @@ def append_prediction_audit(
                 f"{baseline['challenger_probability']:.6f}" if baseline.get("challenger_probability") is not None else "",
                 baseline.get("challenger_sample", 0), baseline.get("challenger_promoted", False),
                 baseline.get("calibration_sample", 0), f"{baseline.get('uncertainty_penalty', 0):.6f}",
-                baseline.get("uncertainty_reason", "standard"), baseline.get("segment_sample", 0),
+                baseline.get("uncertainty_reason", "standard"),
+                baseline.get("team_rest_days", ""), baseline.get("opponent_rest_days", ""),
+                f"{baseline.get('congestion_penalty', 0):.6f}",
+                f"{data_quality['dispersion']:.6f}" if data_quality.get("dispersion") is not None else "",
+                data_quality.get("lineup_status", "unavailable"), data_quality["score"], data_quality["grade"],
+                baseline.get("segment_sample", 0),
                 f"{baseline['segment_roi']:.6f}" if baseline.get("segment_roi") is not None else "",
                 f"{baseline['segment_clv']:.6f}" if baseline.get("segment_clv") is not None else "",
                 baseline.get("segment_suspended", False), baseline.get("segment_key", ""),
@@ -1963,6 +2063,20 @@ def kickoff_state(value: str, now: datetime, window_minutes: int = 90) -> str:
     return "ready"
 
 
+def append_price_snapshot(now: datetime, row: dict, match: dict | None, baseline: dict | None):
+    path = PENDING_FILE.with_name("price-history.csv")
+    headers = ["TIMESTAMP", "DATE", "MATCH", "PICK", "ODDS", "BOOKMAKERS", "DISPERSION", "SOURCE", "EVENT_STATUS"]
+    write_header = not path.exists() or not path.stat().st_size
+    dispersion = pick_market_dispersion(match, row.get("PICK", "")) if match else None
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        if write_header: writer.writerow(headers)
+        writer.writerow([now.isoformat(), row.get("DATE", ""), row.get("MATCH", ""), row.get("PICK", ""),
+                         f"{baseline['team_odds']:.3f}" if baseline else "", (match or {}).get("bookmaker_count", 0),
+                         f"{dispersion:.6f}" if dispersion is not None else "", (match or {}).get("odds_source", ""),
+                         (match or {}).get("status", "")])
+
+
 def revalidate_pending_bets(api_keys: list[str], now: datetime | None = None) -> tuple[int, int]:
     if not PENDING_FILE.exists() or not PENDING_FILE.stat().st_size:
         log("No pending bets to revalidate")
@@ -1992,11 +2106,19 @@ def revalidate_pending_bets(api_keys: list[str], now: datetime | None = None) ->
         enrich_matches_with_goal_model(matches, date_str)
         for row in candidates:
             match = next((m for m in matches if {normalize_team_name(m["team1"]), normalize_team_name(m["team2"])} == {normalize_team_name(row["TEAM1"]), normalize_team_name(row["TEAM2"])}), None)
+            if match and "lineup_status" not in match:
+                match["lineup_status"] = fetch_lineup_status(match)
             reason = None; baseline = calculate_team_baseline(match, row["PICK"]) if match else None
+            append_price_snapshot(now, row, match, baseline)
+            quality = data_quality_assessment(match, baseline, row["PICK"]) if match and baseline else None
+            movement = baseline["team_odds"] / float(row["DISCOVERY_ODDS"]) - 1 if baseline else None
             status_text = f"{(match or {}).get('status', '')} {(match or {}).get('status_detail', '')}".casefold()
             if any(token in status_text for token in ("cancel", "postpon", "abandon", "suspend", "in progress", "halftime", "final")): reason = "fixture_not_pre_match"
             elif not match or not baseline: reason = "market_unavailable"
             elif int(match.get("bookmaker_count") or 0) < 2: reason = "insufficient_bookmakers"
+            elif quality and quality["dispersion"] is not None and quality["dispersion"] > MAX_BOOKMAKER_DISPERSION: reason = "bookmaker_conflict"
+            elif quality and quality["score"] < 5: reason = "data_quality_too_low"
+            elif movement is not None and abs(movement) > MAX_PRICE_MOVEMENT: reason = "extreme_price_movement"
             elif not float(row["ODDS_MIN"]) <= baseline["team_odds"] <= float(row["ODDS_MAX"]): reason = "price_outside_range"
             elif not baseline_is_reliable(baseline): reason = "model_disagreement"
             elif baseline["ev"] <= 0.05: reason = "edge_disappeared"
@@ -2009,7 +2131,7 @@ def revalidate_pending_bets(api_keys: list[str], now: datetime | None = None) ->
                 "STATUS": "authorized", "REASON": "pre_kickoff_validated", "FINAL_ODDS": f"{baseline['team_odds']:.3f}",
                 "FINAL_PROBABILITY": f"{baseline['assessed_probability']:.6f}", "FINAL_EV": f"{baseline['ev']:.6f}",
                 "FINAL_BOOKMAKERS": match.get("bookmaker_count", 0), "FINAL_SOURCE": match.get("odds_source", ""),
-                "PRICE_MOVEMENT": f"{baseline['team_odds'] / float(row['DISCOVERY_ODDS']) - 1:.6f}",
+                "PRICE_MOVEMENT": f"{movement:.6f}",
             })
             authorized_recs.append({"_date": row["DATE"], "team": row["PICK"], "grade": row["GRADE"], "odds": baseline["team_odds"], "assessed_probability": baseline["assessed_probability"], "ev": baseline["ev"], "match": match})
             authorized_matches.append(match)
@@ -2022,6 +2144,14 @@ def revalidate_pending_bets(api_keys: list[str], now: datetime | None = None) ->
         save_bankroll(bankroll, total_stake)
     with PENDING_FILE.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=PENDING_HEADERS, extrasaction="ignore"); writer.writeheader(); writer.writerows(rows)
+    recent = [row for row in rows if row.get("REVALIDATED_AT") == now.isoformat()]
+    lines = ["# Football Bet Lifecycle", "", f"Updated: {now.isoformat()}", "", "| Match | Pick | Status | Reason | Final odds | Final EV |", "|---|---|---|---|---:|---:|"]
+    for row in recent:
+        final_ev = f"{float(row['FINAL_EV']):.1%}" if row.get("FINAL_EV") else "—"
+        lines.append(f"| {row.get('MATCH', '')} | {row.get('PICK', '')} | {row.get('STATUS', '')} | {row.get('REASON', '')} | {row.get('FINAL_ODDS') or '—'} | {final_ev} |")
+    if not recent:
+        lines.append("| — | — | waiting | No candidates were ready in this run | — | — |")
+    PENDING_FILE.with_name("lifecycle-summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     log(f"Pre-kickoff revalidation authorized {len(authorized_recs)}, cancelled {cancelled}")
     return len(authorized_recs), cancelled
 

@@ -40,6 +40,48 @@ class FootballBotTests(unittest.TestCase):
                 + [{"DATE": "2026-02-01", "RESULT": "L", "MODEL_PROBABILITY": ".90", "CLV": "-.05"}] * 30)
         self.assertEqual(bot.model_drift_status(rows)["status"], "alert")
 
+    def test_bookmaker_dispersion_is_calculated(self):
+        payload = {"bookmakers": {
+            "A": [{"name": "1X2", "odds": [{"home": 2.0, "draw": 3.0, "away": 4.0}]}],
+            "B": [{"name": "1X2", "odds": [{"home": 2.2, "draw": 3.2, "away": 3.8}]}],
+        }}
+        market = bot.extract_three_way_market(payload)
+        self.assertGreater(market["home_dispersion"], 0)
+        self.assertEqual(market["bookmaker_count"], 2)
+
+    def test_persistent_team_aliases_normalize_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            aliases = Path(directory) / "aliases.csv"
+            aliases.write_text("CANONICAL,ALIAS\nManchester United,Man Utd\n", encoding="utf-8")
+            with patch.object(bot, "TEAM_ALIASES_FILE", aliases):
+                bot._TEAM_ALIAS_CACHE.update({"mtime": None, "aliases": {}})
+                self.assertEqual(bot.normalize_team_name("Man Utd"), bot.normalize_team_name("Manchester United"))
+
+    def test_data_quality_detects_bookmaker_conflict(self):
+        match = {"team1": "Home", "team2": "Away", "bookmaker_count": 3, "home_dispersion": .20}
+        baseline = {"goal_home_sample": 10, "goal_away_sample": 10, "complete_evidence": True, "signals_agree": True}
+        quality = bot.data_quality_assessment(match, baseline, "Home")
+        self.assertIn("bookmaker_conflict", quality["reasons"])
+
+    def test_price_history_records_each_revalidation_snapshot(self):
+        now = __import__("datetime").datetime(2026, 8, 1, 12, 0, tzinfo=__import__("datetime").timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            pending = Path(directory) / "pending-bets.csv"
+            with patch.object(bot, "PENDING_FILE", pending):
+                bot.append_price_snapshot(now, {"DATE": "2026-08-01", "MATCH": "Home vs Away", "PICK": "Home"},
+                                          {"team1": "Home", "team2": "Away", "bookmaker_count": 3, "home_dispersion": .04, "odds_source": "A/B"},
+                                          {"team_odds": 1.9})
+            history = (Path(directory) / "price-history.csv").read_text(encoding="utf-8")
+        self.assertIn("TIMESTAMP,DATE,MATCH,PICK,ODDS", history)
+        self.assertIn("1.900", history)
+
+    def test_competition_correlation_cap(self):
+        recommendations = []
+        for index in range(3):
+            recommendations.append({"team": f"Home {index}", "grade": "Value Pick", "ev": .10 - index * .01, "score": 8,
+                                    "match": {"team1": f"Home {index}", "team2": f"Away {index}", "tournament": "EPL"}})
+        self.assertEqual(len(bot.select_portfolio(recommendations, max_exposure=.20, max_bets=4)), 2)
+
     def test_segment_suspension_requires_negative_roi_and_clv(self):
         rows = [{"COMPETITION": "EPL", "SIDE": "home", "OPENING_ODDS": "1.80",
                  "RESULT": "L", "CLV": "-0.03"} for _ in range(30)]

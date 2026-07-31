@@ -31,6 +31,12 @@ jobs:
           ODDS_API_KEY_4: ${{ secrets.ODDS_API_KEY_4 }}
           ODDS_API_KEY_5: ${{ secrets.ODDS_API_KEY_5 }}
         run: python football-bot/football_bot.py --revalidate-only
+      - name: Publish authorization summary
+        if: always()
+        run: |
+          if [ -f lifecycle-summary.md ]; then
+            cat lifecycle-summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Commit lifecycle updates
         run: |
           git config --local user.email "football-bot@github.com"

@@ -29,6 +29,21 @@ only after at least 30 results show both ROI below -5% and average CLV below -2%
 Friendlies and youth matches receive a 3-point probability penalty; qualifiers
 and playoffs receive a 1.5-point penalty for lineup and motivation uncertainty.
 
+PRE-KICKOFF DATA QUALITY
+
+The final check also requests confirmed ESPN starting lineups, measures rest
+days from verified league history, and compares prices across bookmakers. A bet
+is cancelled when bookmaker dispersion exceeds 12%, absolute price movement
+from discovery exceeds 10%, fewer than two bookmakers remain, or the combined
+data-quality score falls below 5/10. Missing lineup data is recorded explicitly
+but does not fabricate an injury conclusion.
+
+No more than two bets from the same competition can be authorized in one run.
+Team aliases are stored in team-aliases.csv so equivalent names from ESPN,
+Odds-API and historical result files resolve to the same club.
+Every scheduled check appends its current price, bookmaker count, dispersion and
+event status to price-history.csv, producing a full pre-kickoff movement trail.
+
 EXAMPLES
 
 Bankroll €100.00:
