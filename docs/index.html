@@ -321,6 +321,28 @@
       </div>
     </section>
 
+    <section class="card table-card" style="margin-top:12px">
+      <div class="table-toolbar">
+        <div><h2 class="panel-title">Prediction audit</h2><div class="panel-kicker">Pre-match probability, evidence quality, decision reason and CLV</div></div>
+        <span class="count" id="audit-row-count">0 predictions</span>
+      </div>
+      <div class="table-scroll"><table id="audit-table">
+        <thead><tr><th>Date</th><th>Team</th><th>Competition</th><th>Level</th><th>Side</th><th>Quality</th><th>Odds</th><th>Probability</th><th>EV</th><th>Decision</th><th>Reason</th><th>Result</th><th>CLV</th></tr></thead>
+        <tbody id="audit-body"></tbody>
+      </table></div>
+    </section>
+
+    <section class="card table-card" style="margin-top:12px">
+      <div class="table-toolbar">
+        <div><h2 class="panel-title">Backtest by odds range</h2><div class="panel-kicker">Settled audited picks at recorded opening prices</div></div>
+        <span class="count" id="backtest-row-count">0 settled predictions</span>
+      </div>
+      <div class="table-scroll"><table id="backtest-table">
+        <thead><tr><th>Odds range</th><th>Bets</th><th>Win rate</th><th>Flat-unit ROI</th><th>Brier</th><th>Average CLV</th><th>Reliability</th></tr></thead>
+        <tbody id="backtest-body"></tbody>
+      </table></div>
+    </section>
+
     <footer class="footer"><span>Footbook performance dashboard</span><span>Synced from bets-log.csv, predictions-log.csv and bankroll.txt</span></footer>
 
     <div class="toast" id="toast"></div>
@@ -340,6 +362,7 @@
     const el = id => document.getElementById(id);
     const money = value => new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR" }).format(value || 0);
     const safe = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;" })[char]);
+    const percent = value => { const number = Number.parseFloat(value); return Number.isFinite(number) ? (number * 100).toFixed(1) + "%" : "—"; };
 
     function parseCSV(text) {
       const records = []; let row = []; let field = ""; let quoted = false;
@@ -459,10 +482,37 @@
 
     }
 
+    function renderAudit(rows) {
+      const recent = rows.slice(-100).reverse();
+      el("audit-body").innerHTML = recent.map(row => {
+        const result = String(row.result || "").toLowerCase();
+        const resultCell = ["w","win","won"].includes(result) ? `<span class="badge win">Won</span>` : ["l","loss","lost"].includes(result) ? `<span class="badge loss">Lost</span>` : `<span class="badge pending">Open</span>`;
+        return `<tr><td>${safe(row.date || "—")}</td><td>${safe(row.pick || "—")}</td><td>${safe(row.competition || "—")}</td><td>${safe(row.level || "—")}</td><td>${safe(row.side || "—")}</td><td>${safe(row.quality_grade || "—")}</td><td>${safe(row.opening_odds || "—")}</td><td>${safe(percent(row.model_probability))}</td><td>${safe(percent(row.ev))}</td><td>${safe(row.decision || "—")}</td><td>${safe(row.reason || "—")}</td><td>${resultCell}</td><td>${safe(percent(row.clv))}</td></tr>`;
+      }).join("");
+      el("audit-row-count").textContent = `${rows.length} audited predictions`;
+    }
+
+    function renderBacktest(rows) {
+      const settled = rows.filter(row => ["w","l","win","loss","won","lost"].includes(String(row.result || "").toLowerCase()));
+      const bands = [[1,1.5,"1.0–1.5"],[1.5,2,"1.5–2.0"],[2,2.5,"2.0–2.5"],[2.5,3,"2.5–3.0"],[3,Infinity,"3.0+"]];
+      el("backtest-body").innerHTML = bands.map(([low, high, label]) => {
+        const group = settled.filter(row => Number(row.opening_odds) >= low && Number(row.opening_odds) < high);
+        const wins = group.filter(row => ["w","win","won"].includes(String(row.result).toLowerCase())).length;
+        const profit = group.reduce((sum,row) => sum + (["w","win","won"].includes(String(row.result).toLowerCase()) ? Number(row.opening_odds)-1 : -1), 0);
+        const brier = group.length ? group.reduce((sum,row) => sum + Math.pow(Number(row.model_probability) - (["w","win","won"].includes(String(row.result).toLowerCase()) ? 1 : 0), 2), 0) / group.length : null;
+        const clv = group.filter(row => String(row.clv || "").trim()).map(row => Number(row.clv)).filter(Number.isFinite);
+        const reliability = group.length >= 100 ? "Usable" : group.length >= 30 ? "Developing" : "Small sample";
+        return `<tr><td>${label}</td><td>${group.length}</td><td>${group.length ? (wins/group.length*100).toFixed(1)+"%" : "—"}</td><td class="${profit > 0 ? "positive" : profit < 0 ? "negative" : ""}">${group.length ? (profit/group.length*100).toFixed(1)+"%" : "—"}</td><td>${brier === null ? "—" : brier.toFixed(4)}</td><td>${clv.length ? (clv.reduce((a,b)=>a+b,0)/clv.length*100).toFixed(1)+"%" : "—"}</td><td>${reliability}</td></tr>`;
+      }).join("");
+      el("backtest-row-count").textContent = `${settled.length} settled predictions`;
+    }
+
     function refreshAll() {
       const withLocal = applyLocal(allRows);
       renderStats(withLocal);
       renderTable(withLocal.reverse());
+      renderAudit(auditRows);
+      renderBacktest(auditRows);
       drawChart(withLocal);
       updateStatus(withLocal);
     }

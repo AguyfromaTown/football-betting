@@ -29,6 +29,8 @@ class FootballBotTests(unittest.TestCase):
         self.assertIn('performance-summary.md', html)
         self.assertIn('bankroll.txt', html)
         self.assertIn('["w","win","won"]', html)
+        self.assertIn('id="audit-body"', html)
+        self.assertIn('id="backtest-body"', html)
         self.assertNotIn('Click any <b', html)
         self.assertNotIn('copy-csv-btn', html)
 
@@ -187,6 +189,35 @@ class FootballBotTests(unittest.TestCase):
         self.assertEqual(baseline["evidence_adjustment"], 0.08)
         self.assertAlmostEqual(baseline["assessed_probability"], 0.58)
         self.assertAlmostEqual(baseline["ev"], 0.16)
+
+    def test_evidence_quality_rewards_complete_consistent_match_data(self):
+        match = {
+            "event_id": "123", "level": "Premier League",
+            "home_form": "WWDWW", "away_form": "LDLLD",
+            "home_record": "8-1-1", "away_record": "1-2-7",
+        }
+        baseline = {"complete_evidence": True, "signals_agree": True, "market_overround": 1.05}
+
+        score, grade = bot.evidence_quality(match, baseline)
+
+        self.assertEqual(score, 10)
+        self.assertEqual(grade, "A")
+
+    def test_backtest_summary_segments_football_context(self):
+        rows = [
+            {"DATE": "2026-07-01", "OPENING_ODDS": "2.10", "MODEL_PROBABILITY": "0.52", "EV": "0.09", "RESULT": "W", "CLV": "0.03", "COMPETITION": "EPL", "LEVEL": "Premier League", "SIDE": "home", "QUALITY_GRADE": "A"},
+            {"DATE": "2026-07-02", "OPENING_ODDS": "2.20", "MODEL_PROBABILITY": "0.50", "EV": "0.10", "RESULT": "L", "CLV": "-0.01", "COMPETITION": "EPL", "LEVEL": "Premier League", "SIDE": "away", "QUALITY_GRADE": "B"},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "backtest-summary.md"
+            with patch.object(bot, "BACKTEST_FILE", output):
+                bot.generate_backtest_summary(rows)
+            report = output.read_text(encoding="utf-8")
+
+        self.assertIn("## Odds bands", report)
+        self.assertIn("2.0–2.5 | 2 | 50.0%", report)
+        self.assertIn("## Home and away", report)
+        self.assertIn("## Competition", report)
 
     def test_statistical_candidate_scan_cannot_be_omitted_by_ai(self):
         match = {
