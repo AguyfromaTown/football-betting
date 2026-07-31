@@ -92,6 +92,71 @@ class FootballBotTests(unittest.TestCase):
             0.6894633,
         )
 
+    def test_validation_rejects_selected_teams_own_out_of_range_odds(self):
+        matches = [{
+            "team1": "Longshot",
+            "team2": "Favourite",
+            "home_odds": 5.5,
+            "away_odds": 1.6,
+            "draw_odds": 4.0,
+            "home_form": "WWWWW",
+            "away_form": "LLLLL",
+            "home_record": "10-0-0",
+            "away_record": "0-0-10",
+        }]
+        baseline = bot.calculate_team_baseline(matches[0], "Longshot")
+        candidates = [{
+            "team": "Longshot",
+            "score": baseline["score"],
+            "assessed_probability": baseline["assessed_probability"],
+        }]
+
+        validated = bot.validate_recommendations(candidates, matches, 1.5, 3.0)
+
+        self.assertEqual(validated, [])
+
+    def test_analysis_match_selection_caps_and_prioritizes_best_ev(self):
+        matches = []
+        for index in range(25):
+            matches.append({
+                "team1": f"Home {index}",
+                "team2": f"Away {index}",
+                "home_odds": 2.0,
+                "away_odds": 4.0,
+                "draw_odds": 4.0,
+                "home_form": "WWWWW" if index == 24 else "DDDDD",
+                "away_form": "LLLLL" if index == 24 else "DDDDD",
+                "home_record": "10-0-0" if index == 24 else "5-5-5",
+                "away_record": "0-0-10" if index == 24 else "5-5-5",
+            })
+
+        selected = bot.select_analysis_matches(matches)
+
+        self.assertEqual(len(selected), bot.MAX_AI_MATCHES)
+        self.assertEqual(selected[0]["team1"], "Home 24")
+
+    def test_deterministic_report_contains_machine_readable_candidates(self):
+        match = {
+            "team1": "Home",
+            "team2": "Away",
+            "home_odds": 2.0,
+            "away_odds": 4.0,
+            "draw_odds": 4.0,
+            "home_form": "WWWWW",
+            "away_form": "LLLLL",
+            "home_record": "10-0-0",
+            "away_record": "0-0-10",
+            "tournament": "Test League",
+        }
+        candidates = bot.build_statistical_candidates([match], 1.5, 3.0)
+
+        report = bot.build_deterministic_report(
+            "2026-08-01", [match], candidates, 100.0
+        )
+
+        self.assertIn("## MACHINE READABLE PICKS", report)
+        self.assertEqual(bot.parse_recommendations(report), candidates)
+
     def test_statistical_baseline_devigs_three_way_market(self):
         match = {
             "team1": "Home",

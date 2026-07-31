@@ -26,6 +26,7 @@ REPORTS_DIR = REPO_ROOT / "reports"
 
 REQUEST_TIMEOUT = 30
 MAX_COMPLETION_TOKENS = 4096
+MAX_AI_MATCHES = 20
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -577,6 +578,116 @@ def build_statistical_candidates(
     return candidates
 
 
+def select_analysis_matches(matches: list[dict], limit: int = MAX_AI_MATCHES) -> list[dict]:
+    """Keep the Groq prompt bounded, prioritizing matches with the best baseline EV."""
+    ranked = []
+    for index, match in enumerate(matches):
+        baselines = [
+            calculate_team_baseline(match, match["team1"]),
+            calculate_team_baseline(match, match["team2"]),
+        ]
+        best_ev = max(
+            (baseline["ev"] for baseline in baselines if baseline),
+            default=float("-inf"),
+        )
+        ranked.append((best_ev, -index, match))
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in ranked[:limit]]
+
+
+def build_deterministic_report(
+    date_str: str,
+    matches: list[dict],
+    candidates: list[dict],
+    bankroll: float | None,
+) -> str:
+    """Create a complete report without AI so API failures never stop the workflow."""
+    match_by_team = {}
+    for match in matches:
+        match_by_team[normalize_team_name(match["team1"])] = match
+        match_by_team[normalize_team_name(match["team2"])] = match
+
+    classified = []
+    for candidate in candidates:
+        match = match_by_team.get(normalize_team_name(candidate["team"]))
+        if not match:
+            continue
+        baseline = calculate_team_baseline(match, candidate["team"])
+        if not baseline:
+            continue
+        ev = baseline["ev"]
+        score = baseline["score"]
+        if score > 8 and ev > 0.08:
+            grade = "Top Pick"
+            stake_pct = 0.03
+        elif score > 7 and ev > 0.05:
+            grade = "Value Pick"
+            stake_pct = 0.02
+        elif score > 5.5 and ev > 0:
+            grade = "Moderate Pick"
+            stake_pct = 0.01
+        else:
+            continue
+        classified.append((ev, candidate, match, baseline, grade, stake_pct))
+    classified.sort(key=lambda item: item[0], reverse=True)
+
+    lines = [
+        "## MARKET OVERVIEW",
+        "",
+        f"Python evaluated {len(matches)} verified matches for {date_str}. "
+        "Probabilities use de-vigged three-way market odds plus bounded recent-form "
+        "and season-record adjustments.",
+    ]
+    for heading, grades in (
+        ("TOP PICKS", {"Top Pick"}),
+        ("VALUE PICKS", {"Value Pick", "Moderate Pick"}),
+    ):
+        lines.extend(["", f"## {heading}", ""])
+        entries = [item for item in classified if item[4] in grades]
+        if not entries:
+            lines.append("None.")
+            continue
+        for _, candidate, match, baseline, grade, stake_pct in entries:
+            opponent = (
+                match["team2"] if normalize_team_name(candidate["team"])
+                == normalize_team_name(match["team1"]) else match["team1"]
+            )
+            stake = bankroll * stake_pct if bankroll is not None else None
+            stake_text = f"; stake €{stake:.2f}" if stake is not None else ""
+            lines.append(
+                f"- **{candidate['team']} vs {opponent}** — {grade}; "
+                f"odds {baseline['team_odds']:.2f}; assessed probability "
+                f"{baseline['assessed_probability']:.1%}; EV {baseline['ev']:.2%}; "
+                f"score {baseline['score']:.2f}{stake_text}."
+            )
+
+    machine_picks = [{
+        "team": candidate["team"],
+        "opponent": candidate["opponent"],
+        "score": round(candidate["score"], 6),
+        "assessed_probability": round(candidate["assessed_probability"], 8),
+    } for candidate in candidates]
+    lines.extend([
+        "",
+        "## PICKS TO AVOID",
+        "",
+        "Any team without a positive Python-calculated EV, or whose own odds fall "
+        "outside the requested range.",
+        "",
+        "## DISCLAIMER",
+        "",
+        "This is a simple market-and-results heuristic, not a calibrated guarantee. "
+        "Odds change and betting involves risk. Bet responsibly.",
+        "",
+        "## MACHINE READABLE PICKS",
+        "",
+        "```json",
+        json.dumps(machine_picks, indent=2, ensure_ascii=False),
+        "```",
+    ])
+    return "\n".join(lines) + "\n"
+
+
 def build_prompt(
     date_str: str,
     matches: list[dict],
@@ -911,6 +1022,8 @@ def normalize_team_name(name: str) -> str:
 def validate_recommendations(
     recommendations: list[dict],
     matches: list[dict],
+    odds_min: float | None = None,
+    odds_max: float | None = None,
 ) -> list[dict]:
     """Use verified odds and Python arithmetic to authorize recommendations."""
     validated = []
@@ -946,6 +1059,16 @@ def validate_recommendations(
         if not match_info or verified_odds is None:
             log(f"  Rejected {team or 'unknown'}: no verified team-specific odds")
             continue
+        verified_odds = float(verified_odds)
+        if (
+            (odds_min is not None and verified_odds < odds_min)
+            or (odds_max is not None and verified_odds > odds_max)
+        ):
+            log(
+                f"  Rejected {team}: own odds {verified_odds:.2f} outside "
+                f"requested range {odds_min}-{odds_max}"
+            )
+            continue
 
         baseline = calculate_team_baseline(match_info, verified_team)
         if not baseline:
@@ -962,7 +1085,7 @@ def validate_recommendations(
             )
         probability = baseline["assessed_probability"]
         score = baseline["score"]
-        ev = probability * float(verified_odds) - 1
+        ev = probability * verified_odds - 1
         if score > 8 and ev > 0.08:
             grade = "Top Pick"
         elif score > 7 and ev > 0.05:
@@ -981,7 +1104,7 @@ def validate_recommendations(
             "team": verified_team,
             "score": score,
             "assessed_probability": probability,
-            "odds": float(verified_odds),
+            "odds": verified_odds,
             "ev": ev,
             "grade": grade,
             "match": match_info,
@@ -1163,25 +1286,38 @@ def main():
 
     qualified = attach_odds(all_matches, odds_min, odds_max)
 
-    log("Building analysis prompt...")
-    prompt = build_prompt(date_str, qualified, bankroll, odds_min, odds_max)
-
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        log("ERROR: No API key. Set GROQ_API_KEY env var.")
-        log("Get a free key at https://console.groq.com/keys")
-        sys.exit(1)
-
-    report = call_ai(prompt, api_key)
-
-    ai_candidates = parse_recommendations(report)
-    log(f"Parsed {len(ai_candidates)} AI recommendation candidates from report")
     statistical_candidates = build_statistical_candidates(
         qualified,
         odds_min,
         odds_max,
     )
     log(f"Found {len(statistical_candidates)} positive-EV statistical candidates")
+    analysis_matches = select_analysis_matches(qualified)
+    log(
+        f"Building bounded analysis prompt with {len(analysis_matches)}/"
+        f"{len(qualified)} qualifying matches..."
+    )
+    prompt = build_prompt(date_str, analysis_matches, bankroll, odds_min, odds_max)
+
+    api_key = os.environ.get("GROQ_API_KEY")
+    report = None
+    if api_key:
+        try:
+            report = call_ai(prompt, api_key)
+        except requests.RequestException:
+            log("Groq unavailable; continuing with deterministic Python report")
+    else:
+        log("No GROQ_API_KEY; continuing with deterministic Python report")
+    if report is None:
+        report = build_deterministic_report(
+            date_str,
+            qualified,
+            statistical_candidates,
+            bankroll,
+        )
+
+    ai_candidates = parse_recommendations(report)
+    log(f"Parsed {len(ai_candidates)} AI recommendation candidates from report")
     candidates_by_team = {
         normalize_team_name(candidate["team"]): candidate
         for candidate in ai_candidates
@@ -1190,7 +1326,12 @@ def main():
         candidates_by_team[normalize_team_name(candidate["team"])] = candidate
     candidates = list(candidates_by_team.values())
     log(f"Validating {len(candidates)} unique recommendation candidates")
-    recommendations = validate_recommendations(candidates, qualified)
+    recommendations = validate_recommendations(
+        candidates,
+        qualified,
+        odds_min,
+        odds_max,
+    )
     log(f"Validated {len(recommendations)} recommendations")
     authorized_bets = [
         recommendation
