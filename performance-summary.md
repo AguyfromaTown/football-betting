@@ -1,9 +1,9 @@
 # Football Bot Performance
 
-- Settled bets: 10
-- Win rate: 70.0%
-- Profit/loss: €8.92
-- ROI: 38.60%
+- Settled bets: 12
+- Win rate: 66.7%
+- Profit/loss: €9.73
+- ROI: 36.18%
 - Brier score: N/A
 - Log loss: N/A
 - Shadow challenger Brier: N/A
