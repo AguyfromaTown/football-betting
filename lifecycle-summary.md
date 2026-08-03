@@ -1,7 +1,7 @@
 # Football Bet Lifecycle
 
-Updated: 2026-08-03T17:23:59.010864+00:00
+Updated: 2026-08-03T19:05:04.606638+00:00
 
 | Match | Pick | Status | Reason | Final odds | Final EV |
 |---|---|---|---|---:|---:|
-| — | — | waiting | No candidates were ready in this run | — | — |
+| Sarmiento (Junín) vs Independiente Rivadavia | Independiente Rivadavia | cancelled | insufficient_bookmakers | — | — |
