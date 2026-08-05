@@ -1,6 +1,6 @@
 # Football Bet Lifecycle
 
-Updated: 2026-08-05T17:00:20.530378+00:00
+Updated: 2026-08-05T19:00:00.515904+00:00
 
 | Match | Pick | Status | Reason | Final odds | Final EV |
 |---|---|---|---|---:|---:|
